@@ -1,0 +1,105 @@
+export const metadata = {
+  title: "Introduction",
+  description: "Get started with Kleff — the game server hosting and deployment platform.",
+};
+
+# Introduction
+
+<Badge variant="stable">v0.1</Badge>
+
+Kleff is a **game server hosting and deployment platform** built for teams that need reliable, scalable infrastructure for their game backends.
+
+<Callout type="info" title="What is Kleff?">
+Kleff combines a control plane API, a management panel, and compute daemons into a unified platform for deploying and operating game servers at scale.
+</Callout>
+
+## Core Concepts
+
+Kleff is built around three main primitives:
+
+- **Organizations** — Top-level tenants. Teams and companies operate within an org.
+- **Deployments** — A configured game server workload (image, resources, replicas).
+- **Nodes** — Compute resources where game server instances run.
+
+## Architecture
+
+The platform consists of four components:
+
+| Component | Language | Role |
+| --- | --- | --- |
+| `platform/` | Go 1.23 | Control plane API |
+| `panel/` | Next.js 15 | Management UI |
+| `gameserver-daemon/` | Go | Compute node agent |
+| `argocd/` | Helm/K8s | GitOps infra |
+
+**Communication flow:**
+
+```
+panel  →  platform API  (HTTPS/JSON)
+platform  →  daemon  (domain events + job queue)
+daemon  →  platform  (heartbeat, status updates)
+```
+
+## Quick Start
+
+<Tabs>
+  <Tabs.Tab label="Docker Compose">
+
+Start the full local stack with a single command:
+
+```bash
+docker compose -f docker-compose.dev.yml up
+```
+
+This boots the platform API (port `8080`), PostgreSQL (`5432`), Keycloak (`8180`), and the management panel (`3000`).
+
+  </Tabs.Tab>
+  <Tabs.Tab label="Kubernetes">
+
+Deploy via ArgoCD using the included Helm charts:
+
+```bash
+kubectl apply -f argocd/apps/
+```
+
+ArgoCD will sync all application manifests from the `argocd/` directory.
+
+  </Tabs.Tab>
+</Tabs>
+
+## Environment Variables
+
+The dev stack is configured via environment variables. Key variables for the platform API:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HTTP_PORT` | `8080` | Platform API port |
+| `DATABASE_URL` | `postgres://kleff:kleff@postgres:5432/kleff` | PostgreSQL connection string |
+| `OIDC_AUTHORITY` | `http://keycloak:8080/realms/kleff` | OIDC provider URL |
+| `OIDC_CLIENT_ID` | `kleff-panel` | OIDC client ID |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:3000` | Allowed origins for CORS |
+| `LOG_LEVEL` | `debug` | Logging verbosity |
+
+For the panel:
+
+| Variable | Description |
+| --- | --- |
+| `NEXT_PUBLIC_OIDC_AUTHORITY` | Identity provider URL (e.g. Keycloak realm URL) |
+| `NEXT_PUBLIC_OIDC_CLIENT_ID` | OIDC client to use |
+| `NEXT_PUBLIC_API_BASE_URL` | Platform API base URL |
+
+## Port Map
+
+| Port | Service |
+| --- | --- |
+| `3000` | Management Panel (Next.js) |
+| `8080` | Platform API (Go) |
+| `5432` | PostgreSQL |
+| `8180` | Keycloak (OIDC) |
+| `2345` | Delve debugger (dev only) |
+
+## Next Steps
+
+- Read the [Platform Overview](/docs/platform/overview) to understand the control plane architecture.
+- See [Authentication](/docs/api/authentication) to learn how to authenticate with the API.
+- Explore [Deployments](/docs/platform/deployments) to understand the deployment lifecycle.

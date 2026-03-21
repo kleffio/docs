@@ -1,0 +1,63 @@
+export const metadata = {
+  title: "Daemon Overview",
+  description: "Architecture and responsibilities of the gameserver-daemon.",
+};
+
+# Daemon Overview
+
+<Badge variant="stable">Go + Containers</Badge>
+
+The `gameserver-daemon` is a lightweight Go agent that runs on every compute node in the Kleff cluster. It bridges the control plane (Platform API) with the physical execution layer (Docker or Kubernetes).
+
+<Callout type="info" title="Separation of Concerns">
+The daemon is entirely headless and decoupled from the panel. It never receives direct inbound requests from the platform. It relies exclusively on outbound calls to the platform API (registration, heartbeats) and its job queue.
+</Callout>
+
+## Architecture
+
+The daemon follows a hexagonal architecture tailored for a background worker model:
+
+| Package | Purpose |
+| --- | --- |
+| `internal/domain/` | Node, Server, and Event domain definitions |
+| `internal/application/` | Use cases (e.g., executing a deployment) |
+| `internal/adapters/` | External integrations (Docker API, HTTP client to platform) |
+| `internal/workers/` | Background processes (Heartbeat ticker, Event consumer) |
+| `cmd/daemon/` | Binary entrypoint and bootstrapping |
+
+## Responsibilities
+
+1. **Node Registration** — Registering the underlying host with the control plane.
+2. **Heartbeating** — Periodically reporting metrics (vCPU, memory usage) and node status.
+3. **Execution** — Consuming deployment events and executing container operations on the local machine.
+4. **Observation** — Streaming server status and logs back to the platform.
+
+## Communication Pattern
+
+The platform API never calls the daemon directly. The direction of communication flows strictly outward from the daemon:
+
+```
+Platform             Daemon (Node A)
+   |                       |
+   | ← POST /nodes         | (Registration)
+   | ← PATCH /nodes/{id}   | (Heartbeat)
+   |                       |
+   | → Event Queue →       | (Deployment Event)
+   |                       | (Docker Pull/Run)
+   | ← POST /deployments/  | (Status Update)
+```
+
+## Running Locally
+
+To run the daemon locally alongside the development platform:
+
+```bash
+cd gameserver-daemon
+go run cmd/daemon/main.go
+```
+
+The daemon reads configuration from its environment:
+
+- `PLATFORM_URL` — e.g. `http://localhost:8080/api/v1`
+- `NODE_NAME` — e.g. `local-dev-node-01`
+- `DAEMON_TOKEN` — Auth token for machine-to-machine platform calls

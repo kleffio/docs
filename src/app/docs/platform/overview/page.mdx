@@ -1,0 +1,106 @@
+export const metadata = {
+  title: "Platform Overview",
+  description: "High-level architecture of the Kleff control plane.",
+};
+
+# Platform Overview
+
+The Kleff platform is a **Go modular monolith** that acts as the control plane for all game server operations. It exposes a REST API consumed by the panel and the compute daemons.
+
+<Callout type="info">
+The platform uses a hexagonal architecture per domain module. Each module owns its domain model, ports (interfaces), application layer (commands/queries), and adapters (HTTP, persistence, external).
+</Callout>
+
+## Module Structure
+
+The platform is organized into domain modules under `internal/core/`:
+
+```
+platform/
+  cmd/
+    api/          ← single binary entrypoint
+  internal/
+    core/
+      identity/   ← users, sessions, OIDC
+      organizations/
+      deployments/
+      nodes/
+      billing/
+      usage/
+      audit/
+      admin/
+    shared/       ← ids, clock, config, logging, db, events
+  packages/
+    go-common/    ← shared HTTP primitives
+```
+
+## Domain Modules
+
+Each module follows this internal layout:
+
+```
+<module>/
+  domain/         ← entities, value objects, domain errors
+  ports/          ← interfaces (repository, service contracts)
+  application/
+    commands/     ← write operations (CQRS)
+    queries/      ← read operations
+    policies/     ← cross-cutting rules
+  adapters/
+    http/         ← route handlers
+    persistence/  ← database repositories
+    external/     ← third-party integrations
+```
+
+<Callout type="warning" title="gameserver-daemon">
+The `gameserver-daemon/` is a separate Go module with a hexagonal + queue worker architecture. It runs on each compute node and should be modified independently.
+</Callout>
+
+## Shared Packages
+
+The `internal/shared/` package provides cross-cutting infrastructure:
+
+| Package | Purpose |
+| --- | --- |
+| `ids` | Typed ID generation (ULIDs) |
+| `clock` | Mockable time interface |
+| `config` | Environment-based config loading |
+| `logging` | Structured logging (slog) |
+| `middleware` | HTTP middleware (auth, logging, recovery) |
+| `database` | PostgreSQL connection + migrations |
+| `events` | Domain event bus |
+
+## go-common
+
+The `platform/packages/go-common` module (`github.com/kleff/go-common`) provides shared HTTP primitives:
+
+<CodeGroup>
+  <CodeGroup.Block label="Response helpers">
+
+```go
+// Standardized JSON responses
+common.JSON(w, http.StatusOK, payload)
+common.Error(w, http.StatusBadRequest, "invalid input")
+```
+
+  </CodeGroup.Block>
+  <CodeGroup.Block label="Pagination">
+
+```go
+// Parse cursor-based pagination from query params
+page := common.ParsePage(r)
+// page.Cursor, page.Limit
+```
+
+  </CodeGroup.Block>
+</CodeGroup>
+
+## API Server
+
+The platform runs a single HTTP server using Go's standard `net/http` with `ServeMux` routing patterns introduced in Go 1.22:
+
+```go
+mux.HandleFunc("GET /api/v1/deployments", handler.ListDeployments)
+mux.HandleFunc("POST /api/v1/deployments", handler.CreateDeployment)
+mux.HandleFunc("GET /api/v1/deployments/{id}", handler.GetDeployment)
+```

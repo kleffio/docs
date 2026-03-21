@@ -1,0 +1,82 @@
+export const metadata = {
+  title: "API Endpoints",
+  description: "Comprehensive reference for the Kleff REST API.",
+};
+
+# API Endpoints
+
+<Badge variant="stable">v1.0.0</Badge>
+
+This reference is based on the platform's OpenAPI 3.1 contract. All requests should be made against `https://api.kleff.io/api/v1` (or `http://localhost:8080/api/v1` in local dev).
+
+## Identity
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/identity/me` | Retrieve the authenticated user's profile |
+
+## Organizations
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/organizations` | List organizations the user belongs to |
+| `POST` | `/organizations` | Create a new organization |
+
+## Deployments
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/deployments` | List deployments (supports paginated `page`/`limit` and `gameServerId` filters) |
+| `POST` | `/deployments` | Create a new deployment intent |
+
+### Create Deployment Schema
+
+```json
+{
+  "gameServerId": "01J9X...",
+  "version": "v1.4.2"
+}
+```
+
+## Nodes
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/nodes` | List registered compute nodes |
+| `POST` | `/nodes` | Register a new compute node (daemon only) |
+| `PATCH` | `/nodes/{id}` | Update node status and capacity (daemon heartbeat) |
+
+## Billing
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/billing/subscription` | Fetch current organization subscription details |
+| `GET` | `/billing/invoices` | List billing invoices securely fetched from Stripe |
+
+## Audit
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/audit/events` | List paginated system audit events |
+
+## Common Parameters
+
+| Name | Type | In | Description |
+| --- | --- | --- | --- |
+| `page` | Integer | Query | Page number for pagination (minimum 1, default 1) |
+| `limit` | Integer | Query | Results per page (maximum 100, default 20) |
+| `gameServerId` | String (UUID) | Query | Filter records by game server ID |
+
+## Standard Error Response
+
+When an error occurs, the API returns a structured JSON payload:
+
+```json
+{
+  "error": "description of the error",
+  "code": "error_code_string",
+  "details": {
+    "field_name": ["validation error message"]
+  }
+}
+```

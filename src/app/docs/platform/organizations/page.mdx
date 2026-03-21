@@ -1,0 +1,57 @@
+export const metadata = {
+  title: "Organizations",
+  description: "Multi-tenant boundary, membership, and RBAC in the Kleff platform.",
+};
+
+# Organizations
+
+<Badge variant="stable">Core Module</Badge>
+
+Organizations are the primary multi-tenant boundary in Kleff. Every game server, deployment, billing record, and audit event belongs to exactly one organization.
+
+## Domain Model
+
+An Organization is a top-level aggregate root:
+
+```go
+type Organization struct {
+    ID        string
+    Name      string
+    CreatedAt time.Time
+    UpdatedAt time.Time
+}
+```
+
+## Membership & RBAC
+
+Users are mapped to organizations via an intermediate membership association, which also stores their roles within that specific context.
+
+A user can belong to multiple organizations and hold different roles in each.
+
+| Role | Permissions |
+| --- | --- |
+| `owner` | Full control: manage billing, invite members, modify roles, delete org |
+| `admin` | Manage deployments, nodes, and members |
+| `member` | Create and manage deployments |
+| `billing` | View invoices, manage payment methods |
+| `viewer` | Read-only access to deployments and metrics |
+
+<Callout type="info" title="Auth context">
+When a user authenticates, their access token claims include the `org_id` and their `roles` within that org. The `RequireRole` middleware enforces access based on these claims.
+</Callout>
+
+## API Endpoints
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/v1/organizations` | List organizations for the current user |
+| `POST` | `/api/v1/organizations` | Create a new organization |
+| `GET` | `/api/v1/organizations/{id}` | Get organization details (requires membership) |
+
+### Create Organization Schema
+
+```json
+{
+  "name": "Acme Studios"
+}
+```

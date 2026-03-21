@@ -1,0 +1,69 @@
+export const metadata = {
+  title: "API Authentication",
+  description: "How to authenticate requests to the Kleff platform API.",
+};
+
+# API Authentication
+
+<Badge variant="stable">Bearer Token</Badge>
+
+The Kleff platform API uses **OIDC-based authentication**. All `/api/*` requests must include a valid bearer token obtained from your identity provider.
+
+## Overview
+
+Platform users authenticate with an OIDC identity provider (Keycloak in dev, Auth0 in prod). The panel receives a JSON Web Token (JWT) representing their session and roles.
+
+<Callout type="info" title="Token lifecycle">
+1. The panel redirects to the OIDC provider for login.
+2. The user authenticates and is redirected back with an access token.
+3. The panel passes the access token in the `Authorization` header on all API calls.
+4. The platform validates the token against the OIDC JWKS.
+</Callout>
+
+## Making Authenticated Requests
+
+Include the access token in the HTTP `Authorization` header:
+
+```http
+GET /api/v1/deployments HTTP/1.1
+Host: api.kleff.io
+Authorization: Bearer <access_token>
+```
+
+<Callout type="warning" title="Token Expiry">
+Access tokens are short-lived. The panel handles token refresh automatically via `oidc-client-ts`. If building a custom client, ensure you silently refresh tokens before they expire to prevent unexpected `401 Unauthorized` errors.
+</Callout>
+
+## Error Responses
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| `401` | `unauthorized` | The token is missing, expired, or cryptographically invalid |
+| `403` | `forbidden` | The token is valid, but the user lacks the necessary RBAC role |
+
+## Local Development (Dev Token)
+
+In local development, the platform supports a static dev token to bypass the OIDC flow for easy testing.
+
+<Tabs>
+  <Tabs.Tab label="Docker Compose">
+
+```bash
+# Set in your environment or docker-compose.dev.yml
+PLATFORM_AUTH_DEV_TOKEN=dev-secret-token
+PLATFORM_AUTH_MODE=dev
+```
+
+  </Tabs.Tab>
+  <Tabs.Tab label="cURL">
+
+```bash
+curl -H "Authorization: Bearer dev-secret-token" http://localhost:8080/api/v1/identity/me
+```
+
+  </Tabs.Tab>
+</Tabs>
+
+<Callout type="error" title="Production Security">
+The dev token mode must never be enabled in production environments as it skips all cryptographic validation.
+</Callout>

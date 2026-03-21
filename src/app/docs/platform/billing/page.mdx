@@ -1,0 +1,39 @@
+export const metadata = {
+  title: "Billing",
+  description: "Stripe integration, subscriptions, and usage metering in Kleff.",
+};
+
+# Billing
+
+<Badge variant="stable">Core Module</Badge>
+
+The billing module handles Stripe subscriptions, invoicing, and usage metering on a per-organization basis.
+
+<Callout type="warning" title="Third-Party Adapter">
+The Billing module relies heavily on the Stripe API adapter within `internal/core/billing/adapters/external/`.
+</Callout>
+
+## Subscriptions
+
+Each organization has a corresponding Stripe customer record.
+
+| State | Description |
+| --- | --- |
+| `active` | Active subscription layout, in good standing |
+| `past_due` | Payment failed, grace period |
+| `canceled` | Subscription terminated |
+
+### API Endpoints
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/v1/billing/subscription` | Get the current organization's subscription status |
+| `GET` | `/api/v1/billing/invoices` | List invoices securely fetched from Stripe |
+
+## Usage Metering
+
+Resource consumption (compute time, bandwidth, storage) is aggregated per organization.
+
+The `platform/internal/core/usage/` module records raw usage events, while the billing module periodically aggregates them to report metered usage to Stripe.
+
+*Detailed usage APIs are currently scaffolded and in active development.*

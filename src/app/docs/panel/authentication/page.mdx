@@ -1,0 +1,69 @@
+export const metadata = {
+  title: "Panel Authentication",
+  description: "OIDC flow implementation in the Next.js panel.",
+};
+
+# Panel Authentication
+
+<Badge variant="stable">OIDC Client</Badge>
+
+The panel delegates all authentication responsibilities to an external OIDC provider (Keycloak or Auth0). It uses `react-oidc-context` (built on `oidc-client-ts`) to handle the Authorization Code flow and token management.
+
+## Integration Diagram
+
+```
+[User] → [Next.js Panel]
+              | (unauthenticated)
+              ↓
+[OIDC Provider (Keycloak)]
+              | (logs in, redirects to callback)
+              ↓
+[Panel /auth/callback]
+              | (stores JWT in memory)
+              ↓
+[Platform API] (authenticated with Bearer token)
+```
+
+## Configuration
+
+Auth is configured globally via the `AuthProvider` component wrapping the root layout. It requires three environment variables:
+
+| Variable | Description |
+| --- | --- |
+| `NEXT_PUBLIC_OIDC_AUTHORITY` | The identity provider's URL (e.g., Keycloak realm URL) |
+| `NEXT_PUBLIC_OIDC_CLIENT_ID` | The registered client application ID (`kleff-panel`) |
+| `NEXT_PUBLIC_API_BASE_URL` | Used to configure the Axios client |
+
+## API Client Injection
+
+To ensure the platform API receives the token, we use an Axios request interceptor. The auth provider injects the current access token into the interceptor whenever the token changes or is refreshed.
+
+```ts
+// Simplified interceptor logic
+apiClient.interceptors.request.use((config) => {
+  const token = getAccessToken(); // from OIDC client state
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+```
+
+## Protected Layout
+
+The `(authenticated)` route group layout checks user status:
+
+```tsx
+export default function AuthenticatedLayout({ children }) {
+  const auth = useAuth();
+
+  if (auth.isLoading) return <LoadingScreen />;
+
+  if (!auth.isAuthenticated) {
+    auth.signinRedirect();
+    return null; // Don't render while redirecting
+  }
+
+  return <AppShell>{children}</AppShell>;
+}
+```

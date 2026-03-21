@@ -1,0 +1,102 @@
+export const metadata = {
+  title: "Authentication & Authorization",
+  description: "How Kleff authenticates users and enforces role-based access control.",
+};
+
+# Authentication & Authorization
+
+<Badge variant="stable">OIDC + JWT</Badge>
+
+The Kleff platform uses **OIDC-based bearer token authentication**. All `/api/*` routes require a valid JWT issued by a configured OIDC provider (Keycloak or Auth0).
+
+## How It Works
+
+<Callout type="info" title="Token flow">
+1. The user logs in via the panel — the OIDC provider issues an access token.
+2. The panel stores the token in memory and attaches it to every API request.
+3. The platform validates the token against the OIDC provider's JWKS endpoint.
+4. The token's claims (`sub`, `email`, `org_id`, `roles`) are injected into the request context.
+</Callout>
+
+## Middleware
+
+Two middleware functions guard all authenticated routes in `internal/shared/middleware/`:
+
+```go
+// RequireAuth validates the bearer JWT and injects Claims into the context.
+// Applied globally to all /api/* routes in the bootstrap router.
+middleware.RequireAuth(oidcProvider)
+
+// RequireRole gates a route to users with the specified role(s).
+// Applied per-route on top of RequireAuth.
+middleware.RequireRole("admin", "owner")
+```
+
+## Roles
+
+Roles are scoped to an organization. A user can have different roles in different orgs.
+
+| Role | Description |
+| --- | --- |
+| `owner` | Full control — billing, members, delete org |
+| `admin` | Manage deployments, nodes, and members |
+| `member` | Create and manage deployments |
+| `billing` | View and manage billing only |
+| `viewer` | Read-only access |
+
+## JWT Claims
+
+The platform reads the following claims from the decoded JWT:
+
+| Claim | Type | Description |
+| --- | --- | --- |
+| `sub` | `string` | OIDC subject — maps to `User.ExternalID` |
+| `email` | `string` | User's email address |
+| `org_id` | `string` | Active organization ID |
+| `roles` | `[]string` | User's roles within the org |
+
+## Requesting a Token
+
+<Tabs>
+  <Tabs.Tab label="Keycloak (dev)">
+
+In local dev, Keycloak runs at `http://localhost:8180` with realm `kleff`:
+
+```bash
+curl -s -X POST \
+  http://localhost:8180/realms/kleff/protocol/openid-connect/token \
+  -d grant_type=password \
+  -d client_id=kleff-panel \
+  -d username=admin@kleff.io \
+  -d password=admin | jq .access_token
+```
+
+  </Tabs.Tab>
+  <Tabs.Tab label="Using the token">
+
+Pass the token as a bearer header:
+
+```http
+GET /api/v1/identity/me HTTP/1.1
+Host: localhost:8080
+Authorization: Bearer <access_token>
+```
+
+  </Tabs.Tab>
+</Tabs>
+
+## Error Responses
+
+All auth errors follow the standard error envelope:
+
+```json
+{
+  "error": "authentication required",
+  "code": "unauthorized"
+}
+```
+
+| Status | Code | Cause |
+| --- | --- | --- |
+| `401` | `unauthorized` | Missing, expired, or invalid token |
+| `403` | `forbidden` | Valid token but insufficient role |

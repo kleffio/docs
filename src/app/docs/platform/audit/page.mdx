@@ -1,0 +1,58 @@
+export const metadata = {
+  title: "Audit Log",
+  description: "The append-only audit event log for organization activity.",
+};
+
+# Audit Log
+
+<Badge variant="stable">Core Module</Badge>
+
+The Audit module provides an **append-only, immutable event log** of all significant activity within an organization. It tracks who did what, when, and from where.
+
+## Features
+
+- **Immutability** — Events cannot be modified or deleted once recorded.
+- **Traceability** — Every event is tied to an initiating user, API token, or system actor.
+- **Pagination** — The log supports cursor-based pagination for efficient querying of millions of events.
+
+## Recorded Events
+
+The Kleff platform emits domain events that are asynchronously persisted to the audit log:
+
+| Event Type | Description |
+| --- | --- |
+| `organization.created` | New organization was provisioned |
+| `deployment.created` | A deployment was initiated |
+| `deployment.status_changed` | Deployment reached a terminal state (e.g., succeeded/failed) |
+| `member.invited` | A new user was invited to the org |
+| `member.role_updated` | A member's RBAC role was changed |
+| `billing.subscription_updated` | Subscription state changed |
+
+## API Endpoints
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/v1/audit/events` | List paginated audit events for the active org |
+
+### Example Response
+
+```json
+{
+  "events": [
+    {
+      "id": "evt_01J9X...",
+      "type": "deployment.created",
+      "actor_id": "usr_...",
+      "actor_type": "user",
+      "ip_address": "203.0.113.42",
+      "metadata": {
+        "deployment_id": "dep_...",
+        "game_server_id": "gs_...",
+        "version": "v1.4.2"
+      },
+      "occurred_at": "2026-03-21T01:15:22Z"
+    }
+  ],
+  "next_page": 2
+}
+```

@@ -1,0 +1,78 @@
+export const metadata = {
+  title: "Nodes",
+  description: "The Kleff node model — tracking compute capacity and daemon heartbeats.",
+};
+
+# Nodes
+
+<Badge variant="stable">Core Module</Badge>
+
+A **Node** represents a physical or virtual compute instance registered with the platform. Nodes are managed by the `gameserver-daemon` and report their status and capacity to the control plane.
+
+## Domain Model
+
+```go
+type Node struct {
+    ID        string
+    Hostname  string
+    Region    string
+    IPAddress string
+    Status    NodeStatus
+
+    // Capacity (Total)
+    TotalVCPU   int
+    TotalMemGB  int
+    TotalDiskGB int
+
+    // Reported by daemon heartbeat
+    UsedVCPU   int
+    UsedMemGB  int
+    UsedDiskGB int
+
+    LastHeartbeatAt time.Time
+    CreatedAt       time.Time
+    UpdatedAt       time.Time
+}
+```
+
+## Capacity Tracking
+
+The platform tracks total capacity versus used capacity based on heartbeat data from the daemon.
+
+```go
+// AvailableVCPU returns unallocated CPU.
+func (n *Node) AvailableVCPU() int { return n.TotalVCPU - n.UsedVCPU }
+
+// AvailableMemGB returns unallocated memory in GB.
+func (n *Node) AvailableMemGB() int { return n.TotalMemGB - n.UsedMemGB }
+```
+
+## Status States
+
+A node's operational state is reflected by its `NodeStatus`:
+
+| Status | Description |
+| --- | --- |
+| `online` | Node is active, receiving deployments, and sending heartbeats |
+| `offline` | Node missed consecutive heartbeats or was manually marked offline |
+| `draining` | Node is finishing existing deployments but accepting no new ones |
+| `maintenance`| Node is offline for planned maintenance |
+
+## Heartbeat Protocol
+
+The `gameserver-daemon` running on each node authenticates and periodically calls the platform to report its state:
+
+```http
+PATCH /api/v1/nodes/{id} HTTP/1.1
+Authorization: Bearer <daemon_token>
+Content-Type: application/json
+
+{
+  "status": "online",
+  "usedVcpu": 4,
+  "usedMemGb": 16,
+  "usedDiskGb": 120
+}
+```
+
+If the platform doesn't receive a heartbeat within the configured threshold, the node is automatically transitioned to `offline`.

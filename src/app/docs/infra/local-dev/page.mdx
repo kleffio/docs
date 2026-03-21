@@ -1,0 +1,56 @@
+export const metadata = {
+  title: "Local Development",
+  description: "Running the full Kleff stack locally with Docker Compose.",
+};
+
+# Local Development
+
+<Badge variant="stable">Docker Compose</Badge>
+
+The easiest way to work on the Kleff codebase is using the provided Docker Compose setup. It runs all services (API, Panel, Database, Keycloak) with live-reloading enabled.
+
+## Starting the Stack
+
+From the root of the repository, run:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+```
+
+The `./docker-compose.dev.yml` override mounts your local source code into the containers and configures them for development:
+
+- `panel/` builds with `Dockerfile.dev` using **Next.js Turbopack**
+- `platform/` builds with `Dockerfile.dev` using **Air** for Go live-reload
+
+## Environment Variables
+
+### Panel Variables
+
+| Variable | Default (Dev) | Description |
+| --- | --- | --- |
+| `NEXT_PUBLIC_OIDC_AUTHORITY` | `http://localhost:8180/realms/kleff` | Keycloak realm URL |
+| `NEXT_PUBLIC_OIDC_CLIENT_ID` | `kleff-panel` | Client string |
+| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:8080` | Platform API URL |
+
+### Platform Variables
+
+| Variable | Default (Dev) | Description |
+| --- | --- | --- |
+| `DATABASE_URL` | `postgres://kleff:kleff@postgres...` | Database connection |
+| `OIDC_AUTHORITY` | `http://keycloak:8080/realms/kleff` | Keycloak internally routes via Docker network |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:3000` | Allow panel requests |
+| `LOG_LEVEL` | `debug` | Verbose structured logging |
+
+## Port Map
+
+| Port | Service | Type |
+| --- | --- | --- |
+| `3000` | Panel | HTTP via Next.js |
+| `8080` | Platform API | HTTP via Go standard library |
+| `5432` | PostgreSQL | TCP Database connection |
+| `8180` | Keycloak | HTTP Identity Provider |
+| `2345` | Delve | Go Remote Debugger |
+
+<Callout type="info" title="Debugging Go">
+When running the dev stack, the platform container exposes port `2345`. You can attach a debugger (like VS Code or GoLand) to this port to step through the platform code while handling requests from the panel.
+</Callout>

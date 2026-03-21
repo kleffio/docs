@@ -1,0 +1,136 @@
+export const metadata = {
+  title: "Deployments",
+  description: "The Kleff deployment model — how game server deployments are created, tracked, and executed.",
+};
+
+# Deployments
+
+<Badge variant="stable">Core Module</Badge>
+
+A **Deployment** is a control-plane record representing a single intent to deploy a game server version. The platform records desired state and dispatches execution to daemon workers via domain events.
+
+<Callout type="info" title="Separation of concerns">
+The platform never calls container runtimes directly. It only records intent and emits events. The `gameserver-daemon` consumes those events and performs the actual Docker/Kubernetes operations.
+</Callout>
+
+## Domain Model
+
+```go
+type Deployment struct {
+    ID             string
+    OrganizationID string
+    GameServerID   string
+    Version        string           // image tag or version string
+    Status         DeploymentStatus
+    InitiatedBy    string           // user ID
+    StartedAt      time.Time
+    FinishedAt     *time.Time       // nil until terminal
+    FailureReason  string
+    CreatedAt      time.Time
+    UpdatedAt      time.Time
+}
+```
+
+## Status Lifecycle
+
+A deployment moves through a strict state machine:
+
+```
+pending → in_progress → succeeded
+                     ↘ failed
+                     ↘ rolled_back
+```
+
+| Status | Description |
+| --- | --- |
+| `pending` | Deployment created, waiting for daemon pickup |
+| `in_progress` | Daemon is executing the deployment |
+| `succeeded` | Deployment completed successfully |
+| `failed` | Deployment failed; see `FailureReason` |
+| `rolled_back` | Deployment was reverted |
+
+`succeeded`, `failed`, and `rolled_back` are **terminal states** — a deployment in these states will never transition again.
+
+```go
+// IsTerminal returns true if the deployment has reached a final state.
+func (d *Deployment) IsTerminal() bool {
+    return d.Status == DeploymentSucceeded ||
+        d.Status == DeploymentFailed ||
+        d.Status == DeploymentRolledBack
+}
+```
+
+## Daemon Dispatch
+
+When a deployment is created, the platform emits a `deployment.created` domain event. The daemon subscribes to this event, picks up the job, and executes the container operation.
+
+```
+POST /api/v1/deployments
+     ↓
+platform records Deployment{Status: pending}
+     ↓
+emits domain event: deployment.created
+     ↓
+daemon picks up event from queue
+     ↓
+daemon executes Docker/K8s operation
+     ↓
+daemon reports outcome:
+  POST /api/v1/deployments/{id}/status
+     ↓
+platform updates Status → succeeded | failed
+```
+
+## API Endpoints
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/v1/deployments` | List deployments (paginated, filterable by `gameServerId`) |
+| `POST` | `/api/v1/deployments` | Create a deployment |
+| `GET` | `/api/v1/deployments/{id}` | Get a single deployment |
+| `POST` | `/api/v1/deployments/{id}/status` | Update deployment status (daemon only) |
+
+### Create a Deployment
+
+```http
+POST /api/v1/deployments HTTP/1.1
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "gameServerId": "01J9X...",
+  "version": "v1.4.2"
+}
+```
+
+```json
+// 201 Created
+{
+  "id": "01J9X...",
+  "gameServerId": "01J9X...",
+  "version": "v1.4.2",
+  "status": "pending",
+  "initiatedBy": "usr_...",
+  "startedAt": "2026-03-21T01:00:00Z",
+  "createdAt": "2026-03-21T01:00:00Z"
+}
+```
+
+## Module Layout
+
+```
+internal/core/deployments/
+  domain/
+    deployment.go       ← Deployment struct, status constants, IsTerminal()
+  ports/
+    repository.go       ← DeploymentRepository interface
+  application/
+    commands/
+      create_deployment.go
+    queries/
+      list_deployments.go
+      get_deployment.go
+  adapters/
+    http/               ← HTTP handlers
+    persistence/        ← SQL repository (pgx)
+```

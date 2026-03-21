@@ -1,0 +1,39 @@
+export const metadata = {
+  title: "Deployment Execution",
+  description: "How the daemon receives events and runs game server containers.",
+};
+
+# Deployment Execution
+
+<Badge variant="stable">Event Driven</Badge>
+
+The primary job of the `gameserver-daemon` is to execute container workloads. It transitions platform *intent* into *running software*.
+
+## Event Consumption
+
+The daemon subscribes to an event stream (initially a message queue like RabbitMQ or NATS) listening for `deployment.created` events meant for its specific `NodeID`.
+
+<Callout type="info" title="Push vs Pull">
+The platform does not push instructions directly via an exposed API on the daemon (which would complicate firewall rules). Instead, the daemon maintains a persistent outbound connection to the event queue.
+</Callout>
+
+## Execution Steps
+
+When a `deployment.created` event is received, the daemon executes the following sequence:
+
+1. **Pull Image:** Contacts the configured container registry to pull the specified image tag.
+2. **Setup Volume:** Provisions a host-mapped directory for persistent server data.
+3. **Start Container:** Requests the local Docker/containerd daemon to create and start the container with appropriate resource limits (cgroups) and network bindings.
+4. **Report Status:** Makes an HTTP call back to the platform API indicating `succeeded` or `failed`.
+
+```go
+// Example reporting call
+err := platformClient.UpdateDeploymentStatus(ctx, deploymentID, domain.DeploymentSucceeded, "")
+if err != nil {
+    logger.Error("failed to report deployment success", "error", err)
+}
+```
+
+## Log Aggregation
+
+While the game server runs, the daemon captures standard output and standard error from the container runtime interface. It batches these logs and streams them to the platform's log ingestion endpoint, making them readable via the management panel.

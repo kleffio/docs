@@ -1,0 +1,40 @@
+export const metadata = {
+  title: "Infrastructure Overview",
+  description: "GitOps deployment of the Kleff platform via ArgoCD.",
+};
+
+# Infrastructure Overview
+
+<Badge variant="stable">GitOps</Badge>
+
+The Kleff platform uses **ArgoCD** to manage deployments to Kubernetes in a declarative GitOps fashion.
+
+## Directory Structure
+
+The `argocd/` directory at the root of the repository is monitored by the ArgoCD controller.
+
+```
+argocd/
+  apps/           ← ArgoCD Application definitions (Custom Resources)
+  charts/         ← Base Helm charts for internal services
+  yamls/          ← Raw Kubernetes manifests or Kustomize overlays
+```
+
+## How It Works
+
+1. Changes to infrastructure (like bumping the platform API version) are committed as changes to the Helm `values.yaml` files inside `argocd/`.
+2. The ArgoCD controller, running in the target Kubernetes cluster, detects the drift.
+3. ArgoCD synchronizes the cluster state to match the Git repository automatically.
+
+## Included Applications
+
+The single repository contains all definitions required to boot the control plane:
+
+- **Platform API** — API server and background workers
+- **Panel** — Management UI
+- **PostgreSQL** — Stateful database using a PVC
+- **Keycloak** — OIDC provider for authentication
+
+<Callout type="warning">
+The `gameserver-daemon` is *not* deployed via ArgoCD alongside the platform. Daemons run on compute nodes outside the control plane cluster. They manage their own lifecycles.
+</Callout>

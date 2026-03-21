@@ -1,0 +1,53 @@
+export const metadata = {
+  title: "Panel Overview",
+  description: "Architecture of the Next.js 15 management interface.",
+};
+
+# Panel Overview
+
+<Badge variant="stable">Next.js 15 App Router</Badge>
+
+The `panel` is the human-facing management interface for the Kleff platform. It communicates exclusively with the backend Platform API and has no direct access to the database or compute daemons.
+
+## Tech Stack
+
+- **Framework:** Next.js 15 (App Router)
+- **Language:** TypeScript
+- **Styling:** Tailwind CSS v4 + primitive components (shadcn-ui style)
+- **Data Fetching:** Axios + React Query (via custom hooks)
+- **Auth:** `react-oidc-context` (OIDC client)
+
+## Directory Structure
+
+The codebase is organized entirely within `panel/src/`:
+
+```
+panel/src/
+  app/
+    (authenticated)/      ← Protected layout (dashboard, servers)
+    auth/callback/        ← OIDC callback handler
+    layout.tsx            ← Root layout
+  components/
+    ui/                   ← Reusable primitives (Buttons, Inputs, Dialogs)
+    domain/               ← Business components (ServerList, StatusBadge)
+    layout/               ← AppShell, Sidebar, TopBar
+  features/
+    auth/                 ← OIDC context provider and auth hooks
+  lib/
+    api/                  ← Axios client configuration
+  types/                  ← TypeScript interfaces matching the OpenAPI spec
+```
+
+## The Authenticated Route Group
+
+We leverage Next.js [Route Groups](https://nextjs.org/docs/app/building-your-application/routing/route-groups) to apply authentication rules without affecting the URL.
+
+The `app/(authenticated)` group wraps all management pages in a layout that checks the OIDC session state. If the user is unauthenticated, it automatically invokes `signinRedirect()` to the identity provider.
+
+## Component Design
+
+The panel strictly separates dumb UI primitives from domain-aware components.
+
+- `components/ui/` components (like `Button` or `Card`) never fetch data and know nothing about Kleff.
+- `components/domain/` components (like `GameServerCard`) can accept Kleff-specific types but generally remain stateless.
+- Page files (`page.tsx`) handle data fetching and pass standard props down to the domain components.

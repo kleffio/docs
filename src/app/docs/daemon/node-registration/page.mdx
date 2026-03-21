@@ -1,0 +1,57 @@
+export const metadata = {
+  title: "Node Registration & Heartbeats",
+  description: "How the daemon registers nodes and reports capacity to the platform.",
+};
+
+# Node Registration & Heartbeats
+
+<Badge variant="stable">Outbound HTTP</Badge>
+
+To ensure the control plane has an accurate inventory of compute resources, the daemon performs automatic node registration on startup and subsequent periodic heartbeats.
+
+## Registration Flow
+
+When the daemon boots, it collects hardware metrics (total CPU, total memory, disk space) and registers itself with the platform.
+
+```http
+POST /api/v1/nodes HTTP/1.1
+Authorization: Bearer <daemon_token>
+Content-Type: application/json
+
+{
+  "hostname": "us-east-worker-01",
+  "region": "us-east-1",
+  "ipAddress": "192.168.1.10",
+  "totalVcpu": 16,
+  "totalMemGb": 64,
+  "totalDiskGb": 500
+}
+```
+
+The platform returns a stable `NodeID`, which the daemon persists locally for future heartbeats.
+
+## The Heartbeat Loop
+
+Once registered, the daemon enters a continuous polling loop. Every 15 seconds, it queries the local container runtime (Docker/containerd) for resource usage and posts it back to the platform.
+
+```go
+// Simplified HeartbeatWorker loop
+func (w *HeartbeatWorker) Run(ctx context.Context) {
+    ticker := time.NewTicker(15 * time.Second)
+    defer ticker.Stop()
+
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            used := w.containerRuntime.GetResourceUsage()
+            w.platformClient.SendHeartbeat(ctx, w.nodeID, used)
+        }
+    }
+}
+```
+
+## Node Status Invalidation
+
+The platform explicitly relies on this heartbeat to evaluate system health. If the platform does not receive a heartbeat for a defined timeout window (e.g., 3 missed intervals), the platform automatically transitions the node's status to `offline` and diverts future deployments to healthy nodes.
