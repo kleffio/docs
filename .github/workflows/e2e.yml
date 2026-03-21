@@ -34,13 +34,6 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: next-build
-          path: .next/
-          retention-days: 1
-
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest
@@ -60,11 +53,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Download build artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: next-build
-          path: .next/
+      - name: Build
+        run: pnpm build
 
       - name: Install Playwright browsers
         run: pnpm playwright install chromium --with-deps
