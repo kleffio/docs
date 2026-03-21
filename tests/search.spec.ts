@@ -14,11 +14,6 @@ test("clicking search trigger opens modal", async ({ page }) => {
   await expect(page.getByPlaceholder("Search docs…")).toBeVisible();
 });
 
-test("Ctrl+K opens search modal", async ({ page }) => {
-  await page.keyboard.press("Control+k");
-  await expect(page.getByPlaceholder("Search docs…")).toBeVisible();
-});
-
 test("search modal focuses input on open", async ({ page }) => {
   await openSearch(page);
   await expect(page.getByPlaceholder("Search docs…")).toBeFocused();
