@@ -1,0 +1,46 @@
+---
+name: MDX Lint
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  mdx-lint:
+    name: MDX Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install remark
+        run: |
+          npm install --global \
+            remark-cli \
+            remark-mdx \
+            remark-preset-lint-recommended \
+            remark-lint-no-duplicate-headings \
+            remark-lint-heading-increment \
+            remark-lint-no-empty-sections \
+            remark-lint-no-undefined-references
+      - name: Lint MDX files
+        run: |
+          remark \
+            --use remark-mdx \
+            --use remark-preset-lint-recommended \
+            --use remark-lint-no-duplicate-headings \
+            --use remark-lint-heading-increment \
+            --use remark-lint-no-undefined-references \
+            --ext mdx,md \
+            --frail \
+            .
