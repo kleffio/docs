@@ -1,0 +1,9 @@
+[
+  { "name": "feature", "color": "0075ca", "description": "New feature or enhancement" },
+  { "name": "bugfix", "color": "d73a4a", "description": "Bug fix" },
+  { "name": "chore", "color": "e4e669", "description": "Maintenance or tooling" },
+  { "name": "docs", "color": "0075ca", "description": "Documentation changes" },
+  { "name": "refactor", "color": "cfd3d7", "description": "Code refactor without behavior change" },
+  { "name": "security", "color": "ee0701", "description": "Security related change" },
+  { "name": "tests", "color": "bfd4f2", "description": "Test additions or updates" }
+]

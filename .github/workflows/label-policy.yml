@@ -27,7 +27,7 @@ jobs:
 
   auto-label:
     name: Auto Label
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false
     needs: [label-sync]
     runs-on: ubuntu-latest
     steps:
@@ -38,7 +38,7 @@ jobs:
 
   require-label:
     name: Require Label
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false
     needs: [auto-label]
     runs-on: ubuntu-latest
     steps:

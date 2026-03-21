@@ -40,6 +40,7 @@ jobs:
             --use remark-preset-lint-recommended \
             --use remark-lint-no-duplicate-headings \
             --use remark-lint-heading-increment \
+            --use remark-lint-no-empty-sections \
             --use remark-lint-no-undefined-references \
             --ext mdx,md \
             --frail \
