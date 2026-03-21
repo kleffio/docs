@@ -1,5 +1,8 @@
 ---
 extends: default
+ignore: |
+  pnpm-lock.yaml
+  node_modules/
 rules:
   truthy:
     allowed-values: ["true", "false", "on", "off"]
