@@ -1,0 +1,119 @@
+export const metadata = {
+  title: "Keycloak Configuration",
+  description: "Setting up Keycloak as the OIDC provider for the Kleff platform.",
+};
+
+# Keycloak Configuration
+
+<Badge variant="stable">OIDC Provider</Badge>
+
+Kleff uses **Keycloak** as its OIDC identity provider in both local development and production. Keycloak issues JWTs that the panel and daemon use to authenticate with the Platform API.
+
+<Callout type="info" title="Swap for Auth0 or another provider">
+The platform only requires a standards-compliant OIDC provider. Keycloak is the default, but you can replace it with Auth0, Okta, or any other provider by updating the `OIDC_AUTHORITY` environment variable and ensuring the same JWT claims are present.
+</Callout>
+
+## Local Development Setup
+
+In local dev, Keycloak runs as a Docker service and is pre-seeded with a `kleff` realm, an admin user, and the `kleff-panel` client.
+
+```bash
+# Keycloak is started automatically with the dev stack
+docker compose -f docker-compose.dev.yml up keycloak
+```
+
+Access the admin console at `http://localhost:8180` with credentials `admin` / `admin`.
+
+## Realm Configuration
+
+The Kleff platform expects a Keycloak realm named `kleff`. The key realm settings:
+
+| Setting | Value |
+| --- | --- |
+| Realm name | `kleff` |
+| Token lifespan | `5 minutes` (access token) |
+| Refresh token lifespan | `30 minutes` |
+| JWKS URL | `http://keycloak:8080/realms/kleff/protocol/openid-connect/certs` |
+
+## Client Configuration
+
+The `kleff-panel` client represents the management panel in Keycloak:
+
+| Setting | Value |
+| --- | --- |
+| Client ID | `kleff-panel` |
+| Client Protocol | `openid-connect` |
+| Access Type | `public` (no client secret — PKCE flow) |
+| Valid Redirect URIs | `http://localhost:3000/auth/callback` (dev), `https://app.kleff.io/auth/callback` (prod) |
+| Web Origins | `http://localhost:3000` (dev), `https://app.kleff.io` (prod) |
+
+<Callout type="warning" title="PKCE is required">
+The panel uses the Authorization Code + PKCE flow. Ensure the client is configured as **public** (no client secret) and that PKCE is enforced in the client's Advanced Settings.
+</Callout>
+
+## Required JWT Claims
+
+The platform expects these claims in the access token. Configure Keycloak **Protocol Mappers** on the `kleff-panel` client to include them:
+
+| Claim | Mapper Type | Source |
+| --- | --- | --- |
+| `sub` | Built-in | User ID (always present) |
+| `email` | User Property Mapper | `email` |
+| `org_id` | User Attribute Mapper | `org_id` user attribute |
+| `roles` | User Realm Role Mapper | Realm roles |
+
+### Adding the org_id Mapper
+
+1. Navigate to **Clients** → `kleff-panel` → **Client Scopes** → `kleff-panel-dedicated`.
+2. Click **Add Mapper** → **By Configuration** → **User Attribute**.
+3. Set **Name** to `org_id`, **User Attribute** to `org_id`, **Token Claim Name** to `org_id`.
+4. Enable **Add to access token**.
+
+## Role Setup
+
+Create the following roles in the `kleff` realm (**Realm Roles**):
+
+- `owner`
+- `admin`
+- `member`
+- `billing`
+- `viewer`
+
+Assign roles to users via **Users** → select user → **Role Mappings**.
+
+## Production Keycloak
+
+For production, Keycloak should be deployed with:
+
+- A dedicated PostgreSQL database (not H2)
+- TLS termination (via Ingress or Keycloak's built-in TLS)
+- At least 2 replicas for high availability
+- External session storage (Infinispan or a DB-backed provider)
+
+Update the platform's `OIDC_AUTHORITY` to point at the production Keycloak realm:
+
+```bash
+OIDC_AUTHORITY=https://auth.yourdomain.com/realms/kleff
+```
+
+The panel's environment variable must also be updated:
+
+```bash
+NEXT_PUBLIC_OIDC_AUTHORITY=https://auth.yourdomain.com/realms/kleff
+```
+
+## Obtaining a Token for Testing
+
+Use the Resource Owner Password Grant in local dev (disabled by default in production):
+
+```bash
+curl -s -X POST \
+  http://localhost:8180/realms/kleff/protocol/openid-connect/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=password" \
+  -d "client_id=kleff-panel" \
+  -d "username=admin@kleff.io" \
+  -d "password=admin" | jq -r .access_token
+```
+
+Pass the resulting token as a `Bearer` header to the Platform API.

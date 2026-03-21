@@ -1,0 +1,92 @@
+export const metadata = {
+  title: "Daemon Configuration",
+  description: "Complete environment variable reference for the gameserver-daemon.",
+};
+
+# Daemon Configuration
+
+<Badge variant="stable">Environment Variables</Badge>
+
+The `gameserver-daemon` is configured entirely through environment variables. There is no config file — all settings are read at startup from the process environment.
+
+## Required Variables
+
+These must be set for the daemon to start successfully.
+
+| Variable | Description |
+| --- | --- |
+| `PLATFORM_URL` | Base URL of the Kleff Platform API. e.g. `http://localhost:8080/api/v1` |
+| `DAEMON_TOKEN` | Machine-to-machine auth token for platform API calls |
+| `NODE_NAME` | Human-readable hostname for this node. e.g. `us-east-worker-01` |
+
+## Optional Variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `NODE_REGION` | `unknown` | Region label for the node. e.g. `us-east-1` |
+| `NODE_IP` | Auto-detected | IP address reported during registration. Overrides auto-detection |
+| `HEARTBEAT_INTERVAL` | `15s` | How often the daemon sends heartbeats to the platform |
+| `HEARTBEAT_TIMEOUT_MULTIPLIER` | `3` | Platform marks node offline after this many missed heartbeats |
+| `LOG_LEVEL` | `info` | Logging verbosity: `debug`, `info`, `warn`, `error` |
+| `LOG_FORMAT` | `json` | Log output format: `json` or `text` (text is easier for local dev) |
+| `CONTAINER_RUNTIME` | `docker` | Container runtime to use: `docker` or `containerd` |
+| `DOCKER_HOST` | (system default) | Docker socket path. e.g. `unix:///var/run/docker.sock` |
+| `REGISTRY_AUTH_FILE` | — | Path to a Docker credentials file for private registries |
+| `VOLUME_BASE_PATH` | `/var/lib/kleff/volumes` | Host path for persistent game server volume mounts |
+| `LOG_BATCH_SIZE` | `100` | Number of log lines to batch before flushing to the platform |
+| `LOG_FLUSH_INTERVAL` | `5s` | Maximum interval between log batch flushes |
+| `EVENT_QUEUE_URL` | — | Connection URL for RabbitMQ or NATS. e.g. `amqp://guest:guest@localhost:5672/` |
+| `EVENT_QUEUE_TYPE` | `rabbitmq` | Message queue backend: `rabbitmq` or `nats` |
+
+## Example: Local Development
+
+```bash
+PLATFORM_URL=http://localhost:8080/api/v1
+DAEMON_TOKEN=dev-daemon-token
+NODE_NAME=local-dev-node-01
+NODE_REGION=local
+LOG_LEVEL=debug
+LOG_FORMAT=text
+CONTAINER_RUNTIME=docker
+```
+
+## Example: Production (Docker)
+
+```bash
+PLATFORM_URL=https://api.kleff.io/api/v1
+DAEMON_TOKEN=<secret-from-vault>
+NODE_NAME=us-east-worker-01
+NODE_REGION=us-east-1
+LOG_LEVEL=info
+LOG_FORMAT=json
+HEARTBEAT_INTERVAL=15s
+CONTAINER_RUNTIME=docker
+REGISTRY_AUTH_FILE=/etc/kleff/docker-credentials.json
+EVENT_QUEUE_URL=amqp://kleff:<password>@rabbitmq.internal:5672/
+VOLUME_BASE_PATH=/data/kleff/volumes
+```
+
+<Callout type="warning" title="Daemon Token Security">
+The `DAEMON_TOKEN` grants write access to node and deployment endpoints. It should be treated as a secret — store it in a secrets manager (Vault, AWS Secrets Manager) and inject it at runtime rather than baking it into Docker images or config files.
+</Callout>
+
+## Startup Validation
+
+At boot, the daemon validates its configuration and logs any missing required variables before exiting:
+
+```
+FATAL missing required config: PLATFORM_URL, DAEMON_TOKEN
+```
+
+All detected hardware metrics (total vCPU, memory, disk) are logged at `DEBUG` level on startup so you can verify the values the platform will receive during registration.
+
+## Hardware Auto-Detection
+
+The daemon automatically detects the following from the host system if not overridden:
+
+| Metric | Source |
+| --- | --- |
+| `totalVcpu` | `/proc/cpuinfo` (Linux) or `sysctl` (macOS) |
+| `totalMemGb` | `/proc/meminfo` |
+| `totalDiskGb` | `df` on `VOLUME_BASE_PATH` |
+| `ipAddress` | First non-loopback interface |

@@ -1,0 +1,150 @@
+export const metadata = {
+  title: "Pagination",
+  description: "How to paginate through list endpoints in the Kleff API.",
+};
+
+# Pagination
+
+<Badge variant="stable">Cursor + Page</Badge>
+
+List endpoints in the Kleff API support two pagination styles depending on the resource:
+
+- **Page-based** — Simple integer `page` and `limit` parameters. Used for most resources.
+- **Cursor-based** — An opaque `cursor` token that points to a position in the result set. Used for the Audit Log, which can contain millions of events.
+
+## Page-Based Pagination
+
+Most list endpoints accept `page` and `limit` query parameters:
+
+```http
+GET /api/v1/deployments?page=2&limit=25 HTTP/1.1
+Authorization: Bearer <token>
+```
+
+```json
+{
+  "deployments": [ /* ... */ ],
+  "total": 87,
+  "page": 2,
+  "limit": 25,
+  "pages": 4
+}
+```
+
+### Parameters
+
+| Parameter | Type | Default | Max | Description |
+| --- | --- | --- | --- | --- |
+| `page` | integer | `1` | — | Page number (1-indexed) |
+| `limit` | integer | `20` | `100` | Results per page |
+
+### Response Fields
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `total` | integer | Total number of matching records |
+| `page` | integer | Current page number |
+| `limit` | integer | Results per page as applied |
+| `pages` | integer | Total number of pages (`ceil(total / limit)`) |
+
+## Cursor-Based Pagination
+
+The Audit Log uses cursor-based pagination for efficient traversal of large event streams without the performance cost of `OFFSET` queries.
+
+```http
+GET /api/v1/audit/events?limit=50 HTTP/1.1
+Authorization: Bearer <token>
+```
+
+```json
+{
+  "events": [ /* ... */ ],
+  "next_cursor": "eyJpZCI6IjAxSjlYLi4uIn0="
+}
+```
+
+To fetch the next page, pass the `next_cursor` value:
+
+```http
+GET /api/v1/audit/events?cursor=eyJpZCI6IjAxSjlYLi4uIn0=&limit=50 HTTP/1.1
+```
+
+When `next_cursor` is absent from the response, you have reached the last page.
+
+### Cursor Properties
+
+- Cursors are **opaque** — do not decode or construct them manually.
+- Cursors are **stable** — the same cursor always returns the same next page, even if new records are inserted.
+- Cursors are **short-lived** — they expire after 24 hours. Do not store cursors for long-term use.
+
+## Filtering
+
+List endpoints that support filtering accept additional query parameters alongside pagination:
+
+| Resource | Filter Parameter | Description |
+| --- | --- | --- |
+| `GET /deployments` | `gameServerId` | Filter by game server |
+| `GET /deployments` | `status` | Filter by status (`pending`, `succeeded`, etc.) |
+| `GET /nodes` | `status` | Filter by node status (`online`, `offline`, etc.) |
+| `GET /nodes` | `region` | Filter by region label |
+| `GET /audit/events` | `type` | Filter by event type (e.g., `deployment.created`) |
+| `GET /audit/events` | `actorId` | Filter events by the acting user ID |
+
+Filters and pagination parameters can be combined freely:
+
+```http
+GET /api/v1/deployments?gameServerId=01J9X...&status=failed&page=1&limit=10
+```
+
+## Iterating All Pages
+
+<Tabs>
+  <Tabs.Tab label="TypeScript">
+
+```ts
+async function fetchAllDeployments(gameServerId: string) {
+  const results = [];
+  let page = 1;
+  let hasMore = true;
+
+  while (hasMore) {
+    const { data } = await apiClient.get("/api/v1/deployments", {
+      params: { gameServerId, page, limit: 100 },
+    });
+
+    results.push(...data.deployments);
+    hasMore = page < data.pages;
+    page++;
+  }
+
+  return results;
+}
+```
+
+  </Tabs.Tab>
+  <Tabs.Tab label="Cursor (Audit Log)">
+
+```ts
+async function fetchAllAuditEvents() {
+  const results = [];
+  let cursor: string | undefined;
+
+  do {
+    const { data } = await apiClient.get("/api/v1/audit/events", {
+      params: { cursor, limit: 100 },
+    });
+
+    results.push(...data.events);
+    cursor = data.next_cursor;
+  } while (cursor);
+
+  return results;
+}
+```
+
+  </Tabs.Tab>
+</Tabs>
+
+<Callout type="warning" title="Avoid fetching all pages in one go">
+For large datasets, fetching all pages synchronously blocks the UI. Prefer loading pages incrementally with "Load more" or infinite scroll patterns using React Query's `useInfiniteQuery`.
+</Callout>

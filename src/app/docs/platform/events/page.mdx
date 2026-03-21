@@ -1,0 +1,100 @@
+export const metadata = {
+  title: "Domain Events",
+  description: "How the Kleff platform uses domain events for decoupled communication between modules.",
+};
+
+# Domain Events
+
+<Badge variant="stable">Internal Bus</Badge>
+
+The Kleff platform uses a **domain event bus** to communicate between modules without creating direct dependencies. When something significant happens — a deployment is created, a node goes offline — the originating module emits an event. Other modules (or the daemon) react to it asynchronously.
+
+<Callout type="info" title="Why domain events?">
+Direct method calls between modules create coupling. Events invert the dependency: the deployments module emits `deployment.created` without knowing who cares. The daemon worker, audit logger, and usage recorder each subscribe independently.
+</Callout>
+
+## Event Bus
+
+The event bus lives in `internal/shared/events/`. It is a lightweight in-process pub/sub — not a message broker. For cross-process delivery (to daemons), events are serialized and forwarded to the configured message queue (RabbitMQ or NATS).
+
+```go
+// Publishing an event
+bus.Publish(ctx, events.Event{
+    Type:    "deployment.created",
+    Payload: deploymentCreatedPayload{ID: d.ID, NodeID: d.NodeID},
+})
+
+// Subscribing to an event
+bus.Subscribe("deployment.created", handler.OnDeploymentCreated)
+```
+
+## Event Envelope
+
+Every event shares a common envelope:
+
+```go
+type Event struct {
+    ID          string          // ULID
+    Type        string          // e.g. "deployment.created"
+    OccurredAt  time.Time
+    Payload     json.RawMessage // event-specific data
+}
+```
+
+## Platform Event Catalog
+
+### Deployment Events
+
+| Event Type | Emitted When | Consumers |
+| --- | --- | --- |
+| `deployment.created` | A new deployment intent is persisted | Daemon worker, Audit log |
+| `deployment.status_changed` | Daemon reports terminal status | Audit log, Usage recorder |
+
+### Node Events
+
+| Event Type | Emitted When | Consumers |
+| --- | --- | --- |
+| `node.registered` | A daemon registers a new node | Audit log |
+| `node.offline` | Heartbeat timeout exceeded | Admin alerts, Audit log |
+| `node.status_changed` | Node transitions to `draining` or `maintenance` | Audit log |
+
+### Organization Events
+
+| Event Type | Emitted When | Consumers |
+| --- | --- | --- |
+| `organization.created` | A new org is provisioned | Billing module (Stripe customer creation), Audit log |
+| `member.invited` | A user is invited to an org | Audit log |
+| `member.role_updated` | A member's role changes | Audit log |
+
+### Billing Events
+
+| Event Type | Emitted When | Consumers |
+| --- | --- | --- |
+| `billing.subscription_updated` | Stripe webhook received | Audit log |
+
+## Cross-Process Delivery
+
+For events that need to reach daemons running on compute nodes, the platform bridges the in-process bus to an external message queue:
+
+```
+Platform (in-process bus)
+        ↓
+Event Forwarder (shared/events adapter)
+        ↓
+Message Queue (RabbitMQ / NATS)
+        ↓
+Daemon Event Consumer (per node)
+```
+
+The daemon filters events by `NodeID` — it only processes deployments assigned to its own node.
+
+## Adding a New Event
+
+1. Define the payload struct in the originating module's `domain/` package.
+2. Call `bus.Publish()` at the end of the command handler (after persistence succeeds).
+3. Register a subscriber in any module that needs to react.
+4. If the event must reach a daemon, ensure the forwarder adapter handles the new type.
+
+<Callout type="warning" title="Transactional consistency">
+Events are published after the database write commits. If the publish fails, the event is lost. For critical flows, consider the outbox pattern — writing events to a DB table in the same transaction and publishing them asynchronously.
+</Callout>

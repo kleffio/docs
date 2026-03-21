@@ -1,0 +1,103 @@
+export const metadata = {
+  title: "Error Reference",
+  description: "Complete reference for API error codes and how to handle them.",
+};
+
+# Error Reference
+
+<Badge variant="stable">Error Codes</Badge>
+
+All errors from the Kleff API follow a consistent JSON envelope. This page lists every error code, its HTTP status, and guidance on how to resolve it.
+
+## Error Envelope
+
+```json
+{
+  "error": "human-readable description of the problem",
+  "code": "machine_readable_code",
+  "details": {
+    "field_name": ["specific validation message"]
+  }
+}
+```
+
+The `details` field is only present on `422 Unprocessable Entity` responses.
+
+## Authentication Errors
+
+These errors indicate a problem with the bearer token.
+
+| HTTP | Code | Description | Resolution |
+| --- | --- | --- | --- |
+| `401` | `unauthorized` | No `Authorization` header provided | Add `Authorization: Bearer <token>` |
+| `401` | `token_expired` | The JWT has passed its `exp` claim | Refresh the access token and retry |
+| `401` | `token_invalid` | The JWT signature failed verification | Ensure the token was issued by the correct OIDC provider |
+| `401` | `token_malformed` | The `Authorization` header value is not a valid JWT | Check the header format: `Bearer <jwt>` |
+
+## Authorization Errors
+
+| HTTP | Code | Description | Resolution |
+| --- | --- | --- | --- |
+| `403` | `forbidden` | Valid token but user lacks required RBAC role | Check the user's role in their organization |
+| `403` | `org_mismatch` | The requested resource belongs to a different organization | Verify the `org_id` claim matches the resource's organization |
+
+## Resource Errors
+
+| HTTP | Code | Description | Resolution |
+| --- | --- | --- | --- |
+| `404` | `not_found` | The requested resource does not exist or is not visible to the caller | Verify the resource ID is correct |
+| `409` | `conflict` | A duplicate resource was detected | Check if the resource already exists |
+| `409` | `terminal_state` | A write was attempted on a deployment in a terminal state | Terminal deployments (`succeeded`, `failed`, `rolled_back`) are immutable |
+| `409` | `invalid_transition` | An illegal state machine transition was attempted | Review the valid status transitions |
+
+## Validation Errors
+
+Validation errors (HTTP `422`) always include a `details` object.
+
+```json
+{
+  "error": "validation failed",
+  "code": "validation_error",
+  "details": {
+    "version": ["version is required", "must match semver format"],
+    "gameServerId": ["must be a valid ULID"]
+  }
+}
+```
+
+| HTTP | Code | Description |
+| --- | --- | --- |
+| `400` | `bad_request` | The request body could not be parsed as valid JSON |
+| `422` | `validation_error` | The request body parsed but failed domain validation |
+
+## Node & Daemon Errors
+
+| HTTP | Code | Description | Resolution |
+| --- | --- | --- | --- |
+| `409` | `node_offline` | Deployment was routed to a node that went offline | Wait for node recovery or reassign the deployment |
+| `409` | `node_capacity_exceeded` | The target node lacks resources for the requested deployment | Scale up the node or add more nodes to the cluster |
+| `409` | `node_draining` | The target node is draining and not accepting new deployments | Choose a different node |
+
+## Server Errors
+
+| HTTP | Code | Description |
+| --- | --- | --- |
+| `500` | `internal_error` | An unexpected server-side failure occurred |
+| `503` | `service_unavailable` | The platform is temporarily unavailable (deployment in progress or health check failing) |
+
+<Callout type="info" title="Correlation IDs">
+Every API response includes an `X-Request-ID` header. When reporting a `500` error to support, include this value — it can be used to locate the exact request in the server logs.
+</Callout>
+
+## Retry Guidance
+
+| Error | Safe to Retry? | Notes |
+| --- | --- | --- |
+| `401 token_expired` | Yes | Refresh token first |
+| `404 not_found` | No | The resource doesn't exist |
+| `409 conflict` | No | Resolve the conflict before retrying |
+| `422 validation_error` | No | Fix the request body |
+| `500 internal_error` | Yes | Use exponential backoff |
+| `503 service_unavailable` | Yes | Use exponential backoff with jitter |
+
+For transient server errors, use exponential backoff starting at 1 second with a maximum of 5 retries before surfacing the error to the user.

@@ -1,0 +1,114 @@
+export const metadata = {
+  title: "Log Aggregation",
+  description: "How the daemon collects and streams game server container logs to the platform.",
+};
+
+# Log Aggregation
+
+<Badge variant="stable">Log Streaming</Badge>
+
+The `gameserver-daemon` captures all output from running game server containers and streams it back to the Kleff platform in batches. This makes container logs readable directly in the management panel without needing direct SSH access to compute nodes.
+
+## How It Works
+
+```
+Game Server Container (stdout/stderr)
+           ↓
+Daemon Log Collector (goroutine per container)
+           ↓
+Batch Buffer (in-memory ring buffer)
+           ↓  (every LOG_FLUSH_INTERVAL or LOG_BATCH_SIZE)
+Platform API  POST /api/v1/deployments/{id}/logs
+           ↓
+Database (append-only log storage)
+           ↓
+Panel (streamed via SSE or polling)
+```
+
+## Collection
+
+When a deployment succeeds and a container is running, the daemon attaches to the container's log stream via the Docker/containerd API:
+
+```go
+// Attach to container stdout/stderr
+logReader, err := dockerClient.ContainerLogs(ctx, containerID, types.ContainerLogsOptions{
+    ShowStdout: true,
+    ShowStderr: true,
+    Follow:     true,
+    Timestamps: true,
+})
+```
+
+A dedicated goroutine reads from this stream for the lifetime of the container, forwarding each line to the batch buffer.
+
+## Batching
+
+Logs are not sent line-by-line to avoid overwhelming the platform API. Instead, they accumulate in memory and are flushed when either:
+
+- The buffer reaches `LOG_BATCH_SIZE` lines (default: `100`)
+- The `LOG_FLUSH_INTERVAL` elapses (default: `5s`)
+
+```go
+type LogBatch struct {
+    DeploymentID string
+    Lines        []LogLine
+}
+
+type LogLine struct {
+    Timestamp time.Time
+    Stream    string // "stdout" or "stderr"
+    Content   string
+}
+```
+
+## Platform Ingestion Endpoint
+
+```http
+POST /api/v1/deployments/{id}/logs HTTP/1.1
+Authorization: Bearer <daemon_token>
+Content-Type: application/json
+
+{
+  "lines": [
+    {
+      "timestamp": "2026-03-21T12:00:01.234Z",
+      "stream": "stdout",
+      "content": "[INFO] Server started on port 7777"
+    },
+    {
+      "timestamp": "2026-03-21T12:00:01.512Z",
+      "stream": "stdout",
+      "content": "[INFO] Waiting for players..."
+    }
+  ]
+}
+```
+
+```json
+// 204 No Content
+```
+
+## Lifecycle
+
+| Container State | Log Collection |
+| --- | --- |
+| Starting | Not yet attached — daemon waits for container to be running |
+| Running | Active — goroutine is attached and streaming |
+| Exiting | Goroutine drains remaining output from the stream |
+| Stopped | Final flush is triggered, goroutine exits cleanly |
+
+<Callout type="info" title="Log retention">
+The platform stores log lines in the database for a configurable retention period (default 30 days). Older lines are pruned by a background job in the platform. Logs can also be forwarded to an external log aggregator (Loki, Elasticsearch) via a platform adapter.
+</Callout>
+
+## Error Handling
+
+If the platform API is temporarily unavailable:
+
+1. The daemon continues buffering log lines in memory.
+2. It retries the flush with exponential backoff (max 5 retries).
+3. If the buffer exceeds a maximum size (default: 10,000 lines), the oldest lines are dropped with a warning.
+
+<Callout type="warning" title="Log loss on daemon restart">
+In-memory buffered logs are lost if the daemon process crashes before flushing. This is a known limitation — for production workloads requiring guaranteed log delivery, configure an external log shipper (e.g., Fluent Bit) on the compute node.
+</Callout>

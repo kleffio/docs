@@ -1,0 +1,208 @@
+export const metadata = {
+  title: "UI Components",
+  description: "The panel's primitive UI component library — how components are structured and used.",
+};
+
+# UI Components
+
+<Badge variant="stable">Component Library</Badge>
+
+The panel ships a small, focused library of UI primitives in `panel/src/components/ui/`. These are "dumb" components: they accept props and render UI, but know nothing about Kleff's domain. Domain-aware components that compose these primitives live in `components/domain/`.
+
+<Callout type="info" title="Philosophy">
+Primitives are styled with Tailwind CSS v4 and built on Radix UI where accessible behavior is complex (dialogs, dropdowns, tooltips). They follow a shadcn-inspired pattern — the source lives in the repo and is fully customizable rather than coming from an external package.
+</Callout>
+
+## Component Index
+
+### Button
+
+```tsx
+import { Button } from "@/components/ui/button";
+
+<Button variant="primary" size="md" onClick={handleClick}>
+  Deploy
+</Button>
+
+// Variants: "primary" | "secondary" | "ghost" | "destructive"
+// Sizes: "sm" | "md" | "lg"
+```
+
+### Badge
+
+Status badges for inline labeling:
+
+```tsx
+import { Badge } from "@/components/ui/badge";
+
+<Badge variant="success">Running</Badge>
+<Badge variant="warning">Draining</Badge>
+<Badge variant="error">Failed</Badge>
+<Badge variant="muted">Offline</Badge>
+```
+
+| Variant | Use Case |
+| --- | --- |
+| `success` | Active, running, succeeded states |
+| `warning` | Pending, in-progress, draining states |
+| `error` | Failed, offline, error states |
+| `muted` | Neutral or unknown states |
+| `info` | Informational labels |
+
+### Card
+
+Wrapper for grouped content sections:
+
+```tsx
+import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+
+<Card>
+  <CardHeader>
+    <CardTitle>Deployment History</CardTitle>
+  </CardHeader>
+  <CardContent>
+    {/* table or list */}
+  </CardContent>
+</Card>
+```
+
+### Dialog
+
+Built on Radix UI `Dialog`. Use for confirmations and forms that shouldn't navigate away:
+
+```tsx
+import {
+  Dialog, DialogTrigger, DialogContent,
+  DialogHeader, DialogTitle, DialogFooter
+} from "@/components/ui/dialog";
+
+<Dialog>
+  <DialogTrigger asChild>
+    <Button variant="destructive">Delete Server</Button>
+  </DialogTrigger>
+  <DialogContent>
+    <DialogHeader>
+      <DialogTitle>Delete game server?</DialogTitle>
+    </DialogHeader>
+    <p>This action cannot be undone.</p>
+    <DialogFooter>
+      <Button variant="ghost">Cancel</Button>
+      <Button variant="destructive" onClick={handleDelete}>Delete</Button>
+    </DialogFooter>
+  </DialogContent>
+</Dialog>
+```
+
+### Input & Label
+
+```tsx
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+
+<div className="flex flex-col gap-1">
+  <Label htmlFor="version">Version</Label>
+  <Input
+    id="version"
+    placeholder="v1.4.2"
+    value={version}
+    onChange={(e) => setVersion(e.target.value)}
+  />
+</div>
+```
+
+### Spinner
+
+Full-page and inline loading indicators:
+
+```tsx
+import { Spinner } from "@/components/ui/spinner";
+
+// Inline
+<Spinner size="sm" />
+
+// Full page
+<div className="flex items-center justify-center h-full">
+  <Spinner size="lg" />
+</div>
+```
+
+### Table
+
+Styled table primitives for data grids:
+
+```tsx
+import {
+  Table, TableHeader, TableRow,
+  TableHead, TableBody, TableCell
+} from "@/components/ui/table";
+
+<Table>
+  <TableHeader>
+    <TableRow>
+      <TableHead>Version</TableHead>
+      <TableHead>Status</TableHead>
+      <TableHead>Started</TableHead>
+    </TableRow>
+  </TableHeader>
+  <TableBody>
+    {deployments.map((d) => (
+      <TableRow key={d.id}>
+        <TableCell>{d.version}</TableCell>
+        <TableCell><Badge variant={statusVariant(d.status)}>{d.status}</Badge></TableCell>
+        <TableCell>{formatDate(d.startedAt)}</TableCell>
+      </TableRow>
+    ))}
+  </TableBody>
+</Table>
+```
+
+## Domain Components
+
+Domain components in `components/domain/` compose primitives with Kleff-specific types. They are stateless — they accept data as props and don't fetch it themselves.
+
+### StatusBadge
+
+Converts a `DeploymentStatus` enum to the appropriate `Badge` variant:
+
+```tsx
+import { StatusBadge } from "@/components/domain/StatusBadge";
+
+<StatusBadge status={deployment.status} />
+// Renders: <Badge variant="success">succeeded</Badge>
+```
+
+### GameServerCard
+
+A card summarizing a game server with its latest deployment status:
+
+```tsx
+import { GameServerCard } from "@/components/domain/GameServerCard";
+
+<GameServerCard server={server} latestDeployment={deployment} />
+```
+
+## Adding a New Component
+
+1. Create the file in `components/ui/` (primitive) or `components/domain/` (domain-aware).
+2. Export it from the component file directly — no barrel index file needed.
+3. Use Tailwind CSS v4 utility classes for styling.
+4. If the component needs accessible keyboard/focus behavior (dropdowns, modals), use the corresponding Radix UI primitive as the base.
+5. Export variants via `class-variance-authority` (`cva`) if the component has multiple visual states.
+
+```ts
+import { cva, type VariantProps } from "class-variance-authority";
+
+const buttonVariants = cva("rounded-md font-medium transition-colors", {
+  variants: {
+    variant: {
+      primary: "bg-primary text-primary-foreground hover:bg-primary/90",
+      ghost: "bg-transparent hover:bg-muted",
+    },
+    size: {
+      sm: "px-3 py-1 text-sm",
+      md: "px-4 py-2",
+    },
+  },
+  defaultVariants: { variant: "primary", size: "md" },
+});
+```

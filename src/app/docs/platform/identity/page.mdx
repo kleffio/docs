@@ -1,0 +1,104 @@
+export const metadata = {
+  title: "Identity",
+  description: "The Identity module — user profiles, OIDC sync, and the /me endpoint.",
+};
+
+# Identity
+
+<Badge variant="stable">Core Module</Badge>
+
+The Identity module manages user records in the Kleff platform. It bridges the external OIDC provider (Keycloak or Auth0) with the platform's internal user model, ensuring every authenticated request has a resolved `User` entity in context.
+
+<Callout type="info" title="Users are not created manually">
+Kleff does not have a traditional signup form. User records are created automatically on first login by syncing claims from the OIDC access token.
+</Callout>
+
+## Domain Model
+
+```go
+type User struct {
+    ID         string    // internal ULID
+    ExternalID string    // OIDC `sub` claim
+    Email      string
+    CreatedAt  time.Time
+    UpdatedAt  time.Time
+}
+```
+
+The `ExternalID` field maps to the `sub` claim in the JWT. This is the stable, provider-issued identifier used to look up or create the user on each authenticated request.
+
+## First-Login Sync
+
+When a request arrives with a valid JWT whose `sub` has not been seen before, the platform creates a new `User` record automatically. On subsequent requests, the existing record is fetched and injected into the request context.
+
+```go
+// Simplified identity resolution in RequireAuth middleware
+user, err := identityRepo.FindByExternalID(ctx, claims.Sub)
+if errors.Is(err, ErrNotFound) {
+    user, err = identityRepo.Create(ctx, User{
+        ExternalID: claims.Sub,
+        Email:      claims.Email,
+    })
+}
+ctx = context.WithValue(ctx, ctxKeyUser, user)
+```
+
+## API Endpoints
+
+| Method | Path | Description | Auth |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/identity/me` | Get the authenticated user's profile | Any valid token |
+
+### GET /identity/me
+
+Returns the resolved platform user for the bearer token in the request.
+
+```http
+GET /api/v1/identity/me HTTP/1.1
+Host: localhost:8080
+Authorization: Bearer <access_token>
+```
+
+```json
+// 200 OK
+{
+  "id": "01J9X...",
+  "externalId": "auth0|abc123",
+  "email": "alice@example.com",
+  "createdAt": "2026-01-15T10:00:00Z",
+  "updatedAt": "2026-03-21T08:00:00Z"
+}
+```
+
+This endpoint is useful for verifying that authentication is working and for fetching the internal `User.ID` needed to reference the current user in other API calls.
+
+## Module Layout
+
+```
+internal/core/identity/
+  domain/
+    user.go             ← User struct and domain errors
+  ports/
+    repository.go       ← UserRepository interface
+  application/
+    commands/
+      sync_user.go      ← Upsert user from OIDC claims
+    queries/
+      get_me.go         ← Fetch current user from context
+  adapters/
+    http/
+      me_handler.go     ← GET /identity/me
+    persistence/
+      user_repo.go      ← pgx SQL repository
+```
+
+## Context Propagation
+
+After the `RequireAuth` middleware resolves the user, it is available throughout the request via context helpers:
+
+```go
+// Reading the current user in any handler or command
+user := identity.UserFromContext(ctx)
+```
+
+This avoids repeated database lookups within a single request.

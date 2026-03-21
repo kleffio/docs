@@ -45,9 +45,12 @@ export const navigation: NavSection[] = [
     items: [
       { label: "Overview", slug: "overview" },
       { label: "Authentication", slug: "authentication" },
+      { label: "Error Handling", slug: "error-handling" },
+      { label: "Domain Events", slug: "events" },
       {
         label: "Modules",
         items: [
+          { label: "Identity", slug: "identity" },
           { label: "Deployments", slug: "deployments" },
           { label: "Nodes", slug: "nodes" },
           { label: "Organizations", slug: "organizations" },
@@ -62,8 +65,10 @@ export const navigation: NavSection[] = [
     prefix: "daemon",
     items: [
       { label: "Overview", slug: "overview" },
+      { label: "Configuration", slug: "configuration" },
       { label: "Node Registration", slug: "node-registration" },
       { label: "Deployment Execution", slug: "deployment-execution" },
+      { label: "Log Aggregation", slug: "log-aggregation" },
     ],
   },
   {
@@ -72,6 +77,8 @@ export const navigation: NavSection[] = [
     items: [
       { label: "Overview", slug: "overview" },
       { label: "Authentication", slug: "authentication" },
+      { label: "Data Fetching", slug: "data-fetching" },
+      { label: "UI Components", slug: "components" },
     ],
   },
   {
@@ -80,6 +87,8 @@ export const navigation: NavSection[] = [
     items: [
       { label: "Overview", slug: "overview" },
       { label: "Local Development", slug: "local-dev" },
+      { label: "Production Deployment", slug: "production" },
+      { label: "Keycloak", slug: "keycloak" },
     ],
   },
   {
@@ -88,6 +97,8 @@ export const navigation: NavSection[] = [
     items: [
       { label: "Authentication", slug: "authentication" },
       { label: "Endpoints", slug: "endpoints" },
+      { label: "Pagination", slug: "pagination" },
+      { label: "Errors", slug: "errors" },
     ],
   },
 ];

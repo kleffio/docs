@@ -1,0 +1,170 @@
+export const metadata = {
+  title: "Production Deployment",
+  description: "Deploying the Kleff platform to a production Kubernetes cluster via ArgoCD.",
+};
+
+# Production Deployment
+
+<Badge variant="stable">Kubernetes + ArgoCD</Badge>
+
+The Kleff platform is designed for deployment on Kubernetes using a GitOps workflow with ArgoCD. This page covers the steps to bring up a production control plane cluster.
+
+<Callout type="warning" title="Prerequisites">
+You need: a Kubernetes cluster (v1.28+), `kubectl` configured with cluster admin access, ArgoCD installed in the cluster, and a container registry (GHCR, ECR, or Docker Hub) to host built images.
+</Callout>
+
+## Cluster Requirements
+
+| Component | Minimum Resources |
+| --- | --- |
+| Platform API | 0.5 vCPU, 256 MB RAM |
+| Panel | 0.25 vCPU, 128 MB RAM |
+| PostgreSQL | 1 vCPU, 1 GB RAM, 20 GB PVC |
+| Keycloak | 0.5 vCPU, 512 MB RAM |
+
+These are per-replica minimums. Scale replicas based on load.
+
+## Step 1: Install ArgoCD
+
+```bash
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+```
+
+Wait for ArgoCD pods to become ready:
+
+```bash
+kubectl wait --for=condition=Available deployment --all -n argocd --timeout=120s
+```
+
+## Step 2: Configure Repository Access
+
+ArgoCD needs access to your Git repository to sync manifests. Add your repo via the ArgoCD CLI or UI:
+
+```bash
+argocd repo add https://github.com/your-org/kleff \
+  --username git \
+  --password <personal-access-token>
+```
+
+## Step 3: Apply Application Definitions
+
+The `argocd/apps/` directory contains ArgoCD `Application` custom resources. Apply them to register all Kleff applications with ArgoCD:
+
+```bash
+kubectl apply -f argocd/apps/ -n argocd
+```
+
+ArgoCD will begin syncing the cluster state to match the Helm chart values in `argocd/charts/`.
+
+## Step 4: Configure Secrets
+
+Secrets are not stored in Git. Before ArgoCD can deploy successfully, create the required Kubernetes secrets:
+
+<Tabs>
+  <Tabs.Tab label="Platform API">
+
+```bash
+kubectl create secret generic platform-secrets \
+  --namespace kleff \
+  --from-literal=DATABASE_URL='postgres://kleff:<password>@postgres:5432/kleff' \
+  --from-literal=OIDC_AUTHORITY='https://auth.yourdomain.com/realms/kleff'
+```
+
+  </Tabs.Tab>
+  <Tabs.Tab label="PostgreSQL">
+
+```bash
+kubectl create secret generic postgres-secrets \
+  --namespace kleff \
+  --from-literal=POSTGRES_PASSWORD='<strong-password>'
+```
+
+  </Tabs.Tab>
+  <Tabs.Tab label="Keycloak">
+
+```bash
+kubectl create secret generic keycloak-secrets \
+  --namespace kleff \
+  --from-literal=KEYCLOAK_ADMIN_PASSWORD='<strong-password>'
+```
+
+  </Tabs.Tab>
+</Tabs>
+
+<Callout type="info" title="Secret Management">
+For production, consider using a secrets management solution like Sealed Secrets, External Secrets Operator, or Vault Agent Injector instead of manually creating Kubernetes secrets. This ensures secrets are version-controlled and auditable without storing plaintext in Git.
+</Callout>
+
+## Step 5: Configure Ingress
+
+Expose the platform API and panel externally via an Ingress controller (nginx or Traefik):
+
+```yaml
+# argocd/yamls/ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kleff-ingress
+  namespace: kleff
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  rules:
+    - host: api.kleff.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: platform-api
+                port:
+                  number: 8080
+    - host: app.kleff.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: panel
+                port:
+                  number: 3000
+  tls:
+    - hosts: [api.kleff.io, app.kleff.io]
+      secretName: kleff-tls
+```
+
+## Step 6: Verify Deployment
+
+```bash
+# Check all pods are running
+kubectl get pods -n kleff
+
+# Check the platform API health endpoint
+curl https://api.kleff.io/health
+
+# Tail platform logs
+kubectl logs -n kleff deployment/platform-api -f
+```
+
+## Updating a Service
+
+To deploy a new version of the platform API:
+
+1. Build and push the Docker image with the new tag.
+2. Update `image.tag` in `argocd/charts/platform/values.yaml`.
+3. Commit and push the change to the main branch.
+4. ArgoCD detects the drift and syncs automatically (or manually via `argocd app sync kleff-platform`).
+
+## Rollback
+
+ArgoCD maintains full history of all syncs. To roll back to a previous version:
+
+```bash
+argocd app history kleff-platform
+argocd app rollback kleff-platform <revision-id>
+```
+
+This reverts the Helm values — restore the image tag in Git afterward to keep the repository authoritative.

@@ -1,0 +1,143 @@
+export const metadata = {
+  title: "Data Fetching",
+  description: "How the panel fetches data from the Platform API using Axios and React Query.",
+};
+
+# Data Fetching
+
+<Badge variant="stable">React Query + Axios</Badge>
+
+The panel uses **React Query** (`@tanstack/react-query`) for all server-state management and **Axios** as the HTTP client. This combination gives you caching, background refetching, optimistic updates, and loading/error states without managing them manually.
+
+## Setup
+
+The Axios client is configured in `panel/src/lib/api/client.ts`. A single shared instance is used across the entire app:
+
+```ts
+// lib/api/client.ts
+import axios from "axios";
+
+export const apiClient = axios.create({
+  baseURL: process.env.NEXT_PUBLIC_API_BASE_URL,
+  headers: { "Content-Type": "application/json" },
+});
+```
+
+The OIDC auth interceptor injects the bearer token on every outbound request (see [Panel Authentication](/docs/panel/authentication)).
+
+## Query Hooks
+
+Data fetching is encapsulated in custom hooks that wrap `useQuery`. These live in `panel/src/lib/api/` alongside the Axios functions they call:
+
+```ts
+// lib/api/deployments.ts
+export async function listDeployments(gameServerId?: string) {
+  const { data } = await apiClient.get("/api/v1/deployments", {
+    params: { gameServerId },
+  });
+  return data;
+}
+
+// lib/api/hooks/useDeployments.ts
+import { useQuery } from "@tanstack/react-query";
+import { listDeployments } from "../deployments";
+
+export function useDeployments(gameServerId?: string) {
+  return useQuery({
+    queryKey: ["deployments", gameServerId],
+    queryFn: () => listDeployments(gameServerId),
+  });
+}
+```
+
+Then in a page component:
+
+```tsx
+// app/(authenticated)/servers/[id]/page.tsx
+export default function ServerPage({ params }: { params: { id: string } }) {
+  const { data, isLoading, error } = useDeployments(params.id);
+
+  if (isLoading) return <Spinner />;
+  if (error) return <ErrorBanner error={error} />;
+
+  return <DeploymentList deployments={data.deployments} />;
+}
+```
+
+## Mutation Hooks
+
+Write operations use `useMutation`. Mutations typically invalidate related queries on success to keep the UI fresh:
+
+```ts
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { createDeployment } from "../deployments";
+
+export function useCreateDeployment() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: createDeployment,
+    onSuccess: (_, variables) => {
+      // Invalidate the list so it refetches with the new deployment
+      queryClient.invalidateQueries({
+        queryKey: ["deployments", variables.gameServerId],
+      });
+    },
+  });
+}
+```
+
+## Query Key Conventions
+
+Query keys are arrays that uniquely identify a piece of data. The panel follows this convention:
+
+| Pattern | Scope |
+| --- | --- |
+| `["deployments"]` | All deployments |
+| `["deployments", gameServerId]` | Deployments for a specific server |
+| `["deployments", id]` | A single deployment by ID |
+| `["nodes"]` | All nodes |
+| `["organizations"]` | Org list |
+
+This allows surgical cache invalidation — invalidating `["deployments", gameServerId]` only refetches that specific list, not all deployments.
+
+## Error Handling
+
+Axios errors from the platform API are typed using the standard error envelope:
+
+```ts
+import type { AxiosError } from "axios";
+
+interface PlatformError {
+  error: string;
+  code: string;
+  details?: Record<string, string[]>;
+}
+
+function handleApiError(err: AxiosError<PlatformError>) {
+  const message = err.response?.data?.error ?? "An unexpected error occurred";
+  // display message to user
+}
+```
+
+React Query surfaces these as the `error` property on `useQuery` and `useMutation` return values.
+
+## QueryClient Configuration
+
+The root `QueryClientProvider` is set up in `panel/src/app/layout.tsx` with sensible defaults:
+
+```ts
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30_000,    // 30 seconds before background refetch
+      retry: 1,             // Retry once on failure
+      refetchOnWindowFocus: false,
+    },
+  },
+});
+```
+
+<Callout type="info" title="Server Components">
+The `(authenticated)` layout uses Client Components because it needs access to the OIDC auth state. Data fetching inside this layout happens entirely on the client via React Query — not with Next.js `fetch` in Server Components. This is intentional: the bearer token is not available server-side.
+</Callout>

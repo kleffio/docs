@@ -1,0 +1,115 @@
+export const metadata = {
+  title: "Error Handling",
+  description: "How the Kleff platform structures errors and maps domain failures to HTTP responses.",
+};
+
+# Error Handling
+
+<Badge variant="stable">Consistent Errors</Badge>
+
+The Kleff platform uses a layered error handling approach. Domain errors are defined close to the business logic, and a central HTTP adapter translates them into structured JSON responses with predictable status codes.
+
+## Error Envelope
+
+Every error response from the platform follows this structure:
+
+```json
+{
+  "error": "human-readable description",
+  "code": "machine_readable_code",
+  "details": {
+    "field_name": ["specific validation message"]
+  }
+}
+```
+
+The `details` field is optional and only present for validation errors (HTTP 422).
+
+## HTTP Status Codes
+
+| Status | When Used |
+| --- | --- |
+| `400 Bad Request` | Malformed JSON or structurally invalid request body |
+| `401 Unauthorized` | Missing, expired, or invalid bearer token |
+| `403 Forbidden` | Valid token but insufficient RBAC role |
+| `404 Not Found` | Requested resource does not exist or is not visible to the caller |
+| `409 Conflict` | Resource already exists (e.g., duplicate org name) |
+| `422 Unprocessable Entity` | Request parsed successfully but failed domain validation |
+| `500 Internal Server Error` | Unexpected server-side failure |
+
+## Domain Errors
+
+Each module defines its own sentinel errors in `domain/errors.go`:
+
+```go
+// internal/core/deployments/domain/errors.go
+var (
+    ErrDeploymentNotFound    = errors.New("deployment not found")
+    ErrDeploymentTerminal    = errors.New("deployment is in a terminal state")
+    ErrInvalidStatusTransition = errors.New("invalid status transition")
+)
+```
+
+## Error Mapping
+
+The HTTP adapter in each module maps domain errors to HTTP responses using a shared mapper from `go-common`:
+
+```go
+func (h *Handler) GetDeployment(w http.ResponseWriter, r *http.Request) {
+    dep, err := h.queries.GetDeployment(r.Context(), id)
+    if err != nil {
+        common.MapError(w, err, common.ErrorMap{
+            domain.ErrDeploymentNotFound: http.StatusNotFound,
+            domain.ErrDeploymentTerminal: http.StatusConflict,
+        })
+        return
+    }
+    common.JSON(w, http.StatusOK, dep)
+}
+```
+
+Unmapped errors fall through to a `500 Internal Server Error` with a generic message — stack traces are never exposed to callers.
+
+## Validation Errors
+
+Input validation is handled at the application layer before any domain logic runs. Validation failures return `422 Unprocessable Entity`:
+
+```json
+{
+  "error": "validation failed",
+  "code": "validation_error",
+  "details": {
+    "version": ["version is required"],
+    "gameServerId": ["must be a valid ULID"]
+  }
+}
+```
+
+## Error Codes Reference
+
+| Code | HTTP | Description |
+| --- | --- | --- |
+| `unauthorized` | 401 | Token missing, expired, or invalid |
+| `forbidden` | 403 | Valid token, insufficient role |
+| `not_found` | 404 | Resource does not exist |
+| `conflict` | 409 | Duplicate resource or state conflict |
+| `validation_error` | 422 | Request failed domain or input validation |
+| `internal_error` | 500 | Unexpected server failure |
+
+## Logging
+
+Errors are structured-logged with `slog` at the appropriate level:
+
+- `4xx` client errors → `DEBUG` or `INFO` (not the platform's fault)
+- `5xx` server errors → `ERROR` with full stack context
+
+```go
+slog.Error("unexpected error handling request",
+    "path", r.URL.Path,
+    "error", err,
+)
+```
+
+<Callout type="info" title="Correlation IDs">
+Every request is assigned a unique `X-Request-ID` header. This ID is logged alongside every structured log entry, making it easy to trace a specific request end-to-end in log aggregation tools like Loki or Datadog.
+</Callout>
