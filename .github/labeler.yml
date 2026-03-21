@@ -1,0 +1,21 @@
+---
+docs:
+  - changed-files:
+      - any-glob-to-any-file: "src/**/*.mdx"
+
+feature:
+  - changed-files:
+      - any-glob-to-any-file: "src/components/**"
+      - any-glob-to-any-file: "src/app/**/*.tsx"
+
+chore:
+  - changed-files:
+      - any-glob-to-any-file: ".github/**"
+      - any-glob-to-any-file: "package.json"
+      - any-glob-to-any-file: "pnpm-lock.yaml"
+      - any-glob-to-any-file: "*.config.*"
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file: "tests/**"
+      - any-glob-to-any-file: "playwright.config.*"
