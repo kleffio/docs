@@ -17,6 +17,7 @@ test("Ctrl+K opens search modal", async ({ page }) => {
 test("search modal focuses input on open", async ({ page }) => {
   await page.keyboard.press("Control+k");
   const input = page.getByPlaceholder("Search docs…");
+  await expect(input).toBeVisible();
   await expect(input).toBeFocused();
 });
 
@@ -29,6 +30,7 @@ test("ESC closes search modal", async ({ page }) => {
 
 test("recommended results are shown when modal is empty", async ({ page }) => {
   await page.keyboard.press("Control+k");
+  await expect(page.getByPlaceholder("Search docs…")).toBeVisible();
   await expect(page.getByText("Recommended")).toBeVisible();
 });
 

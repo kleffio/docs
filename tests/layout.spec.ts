@@ -10,7 +10,7 @@ test("navbar is visible", async ({ page }) => {
 });
 
 test("sidebar is visible", async ({ page }) => {
-  await expect(page.locator("nav")).toBeVisible();
+  await expect(page.locator("nav").first()).toBeVisible();
 });
 
 test("sidebar renders all section headings", async ({ page }) => {
