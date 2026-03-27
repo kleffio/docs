@@ -1,0 +1,503 @@
+export const metadata = {
+  title: "API Middleware Plugins",
+  description:
+    "Build plugins that intercept and gate every authenticated API request in Kleff using the api.middleware capability.",
+};
+
+# API Middleware Plugins
+
+<Badge variant="stable">stable</Badge>
+
+## Overview
+
+API middleware plugins intercept every authenticated request that reaches the Kleff platform API. Before the platform processes a request, it calls `OnRequest` on every registered middleware plugin and waits for all of them to return. If any plugin returns `Allow: false`, the platform rejects the request with a `403 Forbidden`. If all plugins return `Allow: true`, the request proceeds normally.
+
+Multiple middleware plugins can be active at the same time. They run concurrently — the platform fans out the `OnRequest` call to all of them simultaneously and collects the results. You do not need to chain or coordinate with other middleware plugins.
+
+Common use cases for middleware plugins:
+
+- **Attribute-Based Access Control (ABAC)** — enforce access rules based on user roles, resource paths, and HTTP methods
+- **Rate limiting** — throttle requests per user or per role to protect downstream game servers
+- **IP allowlisting** — restrict access to specific IP ranges or VPN egress addresses
+- **Audit logging** — record every API action to an external audit log or SIEM
+- **Time-of-day access control** — prevent access outside business hours or maintenance windows
+- **Feature flags** — gate API endpoints behind feature toggles based on user attributes
+
+---
+
+## How It Works
+
+When an authenticated request arrives, the platform executes the following sequence before routing the request to its handler:
+
+```
+1. Request arrives at Platform API
+       │
+2. Bearer token extracted from Authorization header
+       │
+3. Active IDP plugin validates token → Claims (UserID, Roles)
+       │
+4. Manager.RunMiddleware(ctx, userID, roles, method, path) called
+       │
+       ├──▶ OnRequest() ──▶ Middleware Plugin A
+       ├──▶ OnRequest() ──▶ Middleware Plugin B   (concurrent)
+       └──▶ OnRequest() ──▶ Middleware Plugin C
+                │
+5. Collect all responses
+       │
+       ├── Any Allow: false  ──▶ 403 Forbidden
+       ├── Any timeout (5s)  ──▶ 503 Service Unavailable
+       └── All Allow: true   ──▶ Request proceeds to handler
+```
+
+Key points about the execution model:
+
+- All middleware plugins receive the same request data simultaneously
+- The platform does **not** short-circuit on the first denial — all plugins complete before the response is sent
+- A plugin that times out (does not respond within 5 seconds) causes the platform to return `503 Service Unavailable`, protecting the platform from hanging on a slow plugin
+- Middleware plugins do not modify the request — they only allow or deny it
+
+---
+
+## OnRequest RPC
+
+`OnRequest` is the only RPC specific to middleware plugins (in addition to the required `Health` RPC). The platform calls it with a `MiddlewareRequest` and expects a `MiddlewareResponse`.
+
+### MiddlewareRequest Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `UserID` | `string` | Stable user identifier extracted from the validated token's `sub` claim |
+| `Roles` | `[]string` | Roles extracted from the validated token claims |
+| `Method` | `string` | HTTP method in uppercase: `GET`, `POST`, `PUT`, `DELETE`, `PATCH` |
+| `Path` | `string` | Request path, e.g. `/api/v1/servers/abc123/start` |
+| `Headers` | `map[string]string` | All request headers, including `Authorization` with the full `Bearer <token>` value |
+
+### MiddlewareResponse Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Allow` | `bool` | `true` to permit the request, `false` to deny it |
+| `Error` | `*PluginError` | Required when `Allow` is `false`; ignored when `Allow` is `true` |
+
+<Callout type="info" title="Token already validated">
+By the time your middleware plugin receives an OnRequest call, the bearer token has already been validated by the active IDP plugin. The UserID and Roles fields are pre-verified. You do not need to re-validate the token inside your middleware plugin.
+</Callout>
+
+<Callout type="warning" title="Headers contain the Authorization value">
+The Headers map contains the raw `Authorization: Bearer <token>` header. Do not parse or validate the token from this value in your middleware plugin — use the pre-extracted UserID and Roles instead. Re-validating tokens in middleware adds unnecessary latency and duplicates work the platform has already done.
+</Callout>
+
+---
+
+## Implementing OnRequest
+
+### Rate Limiter Example
+
+This example implements per-user rate limiting using a token bucket algorithm. Each user gets a bucket that refills at a configurable rate (requests per second) and has a configurable burst capacity.
+
+```go
+type RateLimiter struct {
+    mu      sync.Mutex
+    buckets map[string]*tokenBucket
+    rate    int // requests per second
+    burst   int
+}
+
+type tokenBucket struct {
+    tokens     float64
+    lastRefill time.Time
+}
+
+func NewRateLimiter(rate, burst int) *RateLimiter {
+    return &RateLimiter{
+        buckets: make(map[string]*tokenBucket),
+        rate:    rate,
+        burst:   burst,
+    }
+}
+
+func (r *RateLimiter) check(userID string) bool {
+    r.mu.Lock()
+    defer r.mu.Unlock()
+
+    bucket, ok := r.buckets[userID]
+    if !ok {
+        bucket = &tokenBucket{tokens: float64(r.burst), lastRefill: time.Now()}
+        r.buckets[userID] = bucket
+    }
+
+    now := time.Now()
+    elapsed := now.Sub(bucket.lastRefill).Seconds()
+    bucket.tokens += elapsed * float64(r.rate)
+    if bucket.tokens > float64(r.burst) {
+        bucket.tokens = float64(r.burst)
+    }
+    bucket.lastRefill = now
+
+    if bucket.tokens >= 1.0 {
+        bucket.tokens--
+        return true
+    }
+    return false
+}
+
+type Server struct {
+    pluginsv1.UnimplementedPluginHealthServer
+    pluginsv1.UnimplementedPluginMiddlewareServer
+    limiter *RateLimiter
+}
+
+func (s *Server) OnRequest(_ context.Context, req *pluginsv1.MiddlewareRequest) (*pluginsv1.MiddlewareResponse, error) {
+    if !s.limiter.check(req.UserID) {
+        return &pluginsv1.MiddlewareResponse{
+            Allow: false,
+            Error: &pluginsv1.PluginError{
+                Code:    pluginsv1.ErrorCodeInternal,
+                Message: "rate limit exceeded",
+            },
+        }, nil
+    }
+    return &pluginsv1.MiddlewareResponse{Allow: true}, nil
+}
+```
+
+---
+
+## Role-Based Access Control (ABAC) Example
+
+This example enforces path-based access control rules. Each rule specifies an HTTP method (or `"*"` for any method), a path prefix, and the set of roles that are permitted. The first matching rule is applied.
+
+```go
+type Rule struct {
+    Method string   // "*" or a specific HTTP method
+    Prefix string   // path prefix to match
+    Roles  []string // any one of these roles grants access
+}
+
+var rules = []Rule{
+    {Method: "*",    Prefix: "/api/v1/admin/", Roles: []string{"admin"}},
+    {Method: "POST", Prefix: "/api/v1/",       Roles: []string{"admin", "operator"}},
+    {Method: "GET",  Prefix: "/api/v1/",       Roles: []string{"admin", "operator", "viewer"}},
+}
+
+func hasAny(userRoles []string, required []string) bool {
+    for _, r := range userRoles {
+        for _, req := range required {
+            if strings.EqualFold(r, req) {
+                return true
+            }
+        }
+    }
+    return false
+}
+
+func (s *Server) OnRequest(_ context.Context, req *pluginsv1.MiddlewareRequest) (*pluginsv1.MiddlewareResponse, error) {
+    for _, rule := range rules {
+        if !strings.HasPrefix(req.Path, rule.Prefix) {
+            continue
+        }
+        if rule.Method != "*" && !strings.EqualFold(rule.Method, req.Method) {
+            continue
+        }
+        if !hasAny(req.Roles, rule.Roles) {
+            return &pluginsv1.MiddlewareResponse{
+                Allow: false,
+                Error: &pluginsv1.PluginError{
+                    Code:    pluginsv1.ErrorCodeUnauthorized,
+                    Message: "insufficient permissions",
+                },
+            }, nil
+        }
+        break
+    }
+    return &pluginsv1.MiddlewareResponse{Allow: true}, nil
+}
+```
+
+Rules are evaluated in order. More specific prefixes should be placed before less specific ones. In the example above, `/api/v1/admin/` is checked before the generic `/api/v1/` prefix, so admin-only routes are correctly guarded even when a broader rule would have matched.
+
+<Callout type="info" title="Loading rules from config">
+In a real plugin, you would load these rules from environment variables or a config file at startup rather than hardcoding them. The manifest `config` array lets you expose rule configuration to the administrator through the Kleff admin panel.
+</Callout>
+
+---
+
+## Audit Logging Example
+
+Audit middleware plugins always return `Allow: true` — their purpose is to record what happened, not to gate access. Because logging to an external service involves I/O, it must be done asynchronously so it does not add latency to the request path.
+
+```go
+type auditEvent struct {
+    UserID    string
+    Roles     []string
+    Method    string
+    Path      string
+    Timestamp time.Time
+}
+
+func (s *Server) OnRequest(ctx context.Context, req *pluginsv1.MiddlewareRequest) (*pluginsv1.MiddlewareResponse, error) {
+    go s.audit.Log(auditEvent{
+        UserID:    req.UserID,
+        Roles:     req.Roles,
+        Method:    req.Method,
+        Path:      req.Path,
+        Timestamp: time.Now(),
+    })
+    return &pluginsv1.MiddlewareResponse{Allow: true}, nil
+}
+```
+
+<Callout type="warning" title="Always log asynchronously">
+Do not block OnRequest on I/O. If your audit service is slow or temporarily unavailable, a synchronous log call will cause every API request in the platform to slow down or fail. Use goroutines and a buffered channel or queue to absorb bursts without blocking.
+</Callout>
+
+A production audit logger should use a buffered channel and a background worker goroutine to drain it, rather than spawning a new goroutine per request:
+
+```go
+type AuditLogger struct {
+    queue chan auditEvent
+}
+
+func NewAuditLogger(bufferSize int) *AuditLogger {
+    al := &AuditLogger{queue: make(chan auditEvent, bufferSize)}
+    go al.worker()
+    return al
+}
+
+func (al *AuditLogger) Log(e auditEvent) {
+    select {
+    case al.queue <- e:
+    default:
+        // queue full — drop or count as a metric; never block
+    }
+}
+
+func (al *AuditLogger) worker() {
+    for e := range al.queue {
+        // write e to your audit service
+        _ = e
+    }
+}
+```
+
+---
+
+## IP Allowlisting Example
+
+IP allowlist middleware checks the `X-Forwarded-For` header against a set of allowed CIDR ranges. This is useful when Kleff is deployed behind a load balancer or reverse proxy that sets this header.
+
+```go
+import (
+    "net"
+    "strings"
+)
+
+type IPAllowlist struct {
+    nets []*net.IPNet
+}
+
+func NewIPAllowlist(cidrs []string) (*IPAllowlist, error) {
+    var nets []*net.IPNet
+    for _, cidr := range cidrs {
+        _, ipNet, err := net.ParseCIDR(cidr)
+        if err != nil {
+            return nil, err
+        }
+        nets = append(nets, ipNet)
+    }
+    return &IPAllowlist{nets: nets}, nil
+}
+
+func (a *IPAllowlist) Contains(ip string) bool {
+    parsed := net.ParseIP(strings.TrimSpace(ip))
+    if parsed == nil {
+        return false
+    }
+    for _, n := range a.nets {
+        if n.Contains(parsed) {
+            return true
+        }
+    }
+    return false
+}
+
+func (s *Server) OnRequest(_ context.Context, req *pluginsv1.MiddlewareRequest) (*pluginsv1.MiddlewareResponse, error) {
+    xff := req.Headers["X-Forwarded-For"]
+    if xff == "" {
+        // No X-Forwarded-For — request did not come through the proxy
+        return &pluginsv1.MiddlewareResponse{
+            Allow: false,
+            Error: &pluginsv1.PluginError{
+                Code:    pluginsv1.ErrorCodeUnauthorized,
+                Message: "request origin could not be determined",
+            },
+        }, nil
+    }
+
+    // X-Forwarded-For may contain a comma-separated list of IPs.
+    // The leftmost IP is the original client. Intermediary proxies append their own IP.
+    // Use the leftmost value: "client, proxy1, proxy2"
+    clientIP := strings.SplitN(xff, ",", 2)[0]
+
+    if !s.allowlist.Contains(clientIP) {
+        return &pluginsv1.MiddlewareResponse{
+            Allow: false,
+            Error: &pluginsv1.PluginError{
+                Code:    pluginsv1.ErrorCodeUnauthorized,
+                Message: "IP address not allowed",
+            },
+        }, nil
+    }
+    return &pluginsv1.MiddlewareResponse{Allow: true}, nil
+}
+```
+
+**X-Forwarded-For edge cases**
+
+- The header can contain multiple IPs separated by commas: `203.0.113.5, 10.0.0.1, 10.0.0.2`. Always use the leftmost IP as the original client address.
+- The header can be spoofed by clients if your platform is not behind a trusted proxy. Only use `X-Forwarded-For` if you control the proxy and trust it to set the header correctly.
+- If your reverse proxy uses a different header (e.g. `X-Real-IP`), check for that instead.
+- IPv6 addresses will appear in the header with or without brackets. Normalize before comparing.
+
+<Callout type="warning" title="X-Forwarded-For can be spoofed">
+If Kleff is directly internet-facing without a trusted reverse proxy, clients can forge the X-Forwarded-For header and bypass this check. Ensure your infrastructure always rewrites this header at the proxy boundary before relying on it for security enforcement.
+</Callout>
+
+---
+
+## Performance Guidelines
+
+`OnRequest` is called on every authenticated API request. Even small inefficiencies compound at scale. The following guidelines keep middleware plugins from becoming a bottleneck.
+
+| Guideline | Why |
+|-----------|-----|
+| Target under 5ms per `OnRequest` call | The platform enforces a 5-second timeout; slow middleware degrades latency for all requests, not just the ones your plugin acts on |
+| Use in-memory state for decisions | Avoid database queries or external HTTP calls on the hot path; load configuration at startup and keep it in memory |
+| Use background goroutines for async work | Logging, metric recording, and event publishing should never block the response |
+| Pre-compile regex patterns at startup | Compiling a regex pattern on every request is expensive; compile once in the constructor and reuse |
+| Avoid allocations in the hot path | Frequent small allocations increase GC pressure under high request rates; reuse objects where possible |
+| Evict stale rate limiter entries | A map of token buckets that grows without bound is a memory leak; run a background goroutine that removes entries for users who haven't been seen in a configurable window |
+| Do not re-validate the bearer token | The IDP plugin already validated it; calling your IdP from middleware doubles auth latency |
+
+---
+
+## Configuration via Environment Variables
+
+Middleware plugin behavior should be configurable without recompiling the plugin. Declare configuration fields in your manifest's `config` array, and read them from environment variables at startup.
+
+```json
+{
+  "config": [
+    { "key": "RATE_LIMIT_RPS", "label": "Requests Per Second", "type": "number", "default": "100" },
+    { "key": "RATE_LIMIT_BURST", "label": "Burst Size", "type": "number", "default": "200" },
+    { "key": "ALLOWLIST_ENABLED", "label": "Enable IP Allowlisting", "type": "boolean", "default": "false" }
+  ]
+}
+```
+
+Read these values in your `main.go` before constructing the server:
+
+```go
+func env(key, fallback string) string {
+    if v := os.Getenv(key); v != "" {
+        return v
+    }
+    return fallback
+}
+
+func main() {
+    rps, _   := strconv.Atoi(env("RATE_LIMIT_RPS", "100"))
+    burst, _ := strconv.Atoi(env("RATE_LIMIT_BURST", "200"))
+    allowlistEnabled := env("ALLOWLIST_ENABLED", "false") == "true"
+
+    srv := &Server{
+        limiter:          NewRateLimiter(rps, burst),
+        allowlistEnabled: allowlistEnabled,
+    }
+    _ = srv
+}
+```
+
+The Kleff admin panel renders configuration fields declared in the manifest as a form. When an administrator saves the configuration, the platform restarts the plugin container with the new environment variables applied.
+
+---
+
+## Complete main.go
+
+```go
+package main
+
+import (
+    "net"
+    "os"
+    "strconv"
+
+    "google.golang.org/grpc"
+    pluginsv1 "github.com/kleff/proto/gen/go/plugins/v1"
+)
+
+func env(key, fallback string) string {
+    if v := os.Getenv(key); v != "" {
+        return v
+    }
+    return fallback
+}
+
+func main() {
+    rps, _   := strconv.Atoi(env("RATE_LIMIT_RPS", "100"))
+    burst, _ := strconv.Atoi(env("RATE_LIMIT_BURST", "200"))
+
+    srv := &Server{
+        limiter: NewRateLimiter(rps, burst),
+    }
+
+    gs := grpc.NewServer()
+    pluginsv1.RegisterPluginHealthServer(gs, srv)
+    pluginsv1.RegisterPluginMiddlewareServer(gs, srv)
+
+    port := env("PLUGIN_PORT", "50051")
+    lis, err := net.Listen("tcp", ":"+port)
+    if err != nil {
+        panic(err)
+    }
+
+    if err := gs.Serve(lis); err != nil {
+        panic(err)
+    }
+}
+```
+
+The plugin registers two gRPC services: `PluginHealth` (required by every plugin) and `PluginMiddleware` (the middleware-specific service). The `PLUGIN_PORT` environment variable is injected by the platform at container startup; you should not hardcode it.
+
+---
+
+## Manifest Example
+
+```json
+{
+  "id": "middleware-ratelimit",
+  "name": "Rate Limiter",
+  "type": "middleware",
+  "description": "Token-bucket rate limiting per user.",
+  "capabilities": ["api.middleware"],
+  "config": [
+    { "key": "RATE_LIMIT_RPS", "label": "Requests Per Second", "type": "number", "default": "100" },
+    { "key": "RATE_LIMIT_BURST", "label": "Burst Size", "type": "number", "default": "200" }
+  ]
+}
+```
+
+The `capabilities` array must include `"api.middleware"` for the platform to treat this plugin as a middleware plugin and call `OnRequest` on it. A plugin that declares `api.middleware` but does not implement the `PluginMiddleware` gRPC service will fail health checks and be moved to the `ERROR` state immediately after registration.
+
+---
+
+## Troubleshooting
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| All requests returning `403` | `OnRequest` always returns `Allow: false`, or a logic bug causes every path to hit a denial branch | Add structured logging inside `OnRequest` that records the inputs and the decision; reproduce with a known-good request and trace through the logic |
+| Requests timing out with `503` | `OnRequest` is taking longer than 5 seconds, usually due to a synchronous external call | Profile with pprof; move any network I/O off the hot path; check for blocked goroutines waiting on a mutex |
+| Memory growing unboundedly | Rate limiter buckets or other per-user state is never cleaned up | Add a background goroutine that iterates the map and evicts entries that haven't been accessed within a configurable idle window (e.g. 10 minutes) |
+| Plugin reports `DEGRADED` | A dependency the plugin checks in `Health` is unavailable | Check connectivity from the plugin container to the dependency; verify credentials and hostnames in config |
+| Audit logs missing some requests | Audit queue buffer is too small and events are being dropped | Increase the buffer size via config; add a dropped-event counter and expose it as a metric |
+| ABAC rules not matching as expected | Rule order is wrong, or prefix matching is too broad | Log the matched rule (or lack of one) per request; ensure more specific prefixes appear before less specific ones in the rule list |

@@ -1,0 +1,247 @@
+export const metadata = {
+  title: "SDK IDP Types",
+  description: "Reference for all identity provider types in the Kleff plugin SDK — tokens, claims, registration, and OIDC.",
+};
+
+# SDK IDP Types
+
+<Badge variant="stable">stable</Badge>
+
+This page documents the types used by the `IdentityPlugin` gRPC service. These types are only
+relevant for plugins that declare the `identity.provider` capability.
+
+For health, error, middleware, UI, and HTTP route types, see [SDK Common Types](../sdk-common-types).
+
+## Login
+
+### LoginRequest
+
+```go
+type LoginRequest struct {
+    Username string
+    Password string
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Username` | `string` | Username or email submitted by the user. Passed through as-is |
+| `Password` | `string` | Plaintext password. Never stored by the platform |
+
+### LoginResponse
+
+```go
+type LoginResponse struct {
+    Token *TokenSet
+    Error *PluginError
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Token` | `*TokenSet` | Populated on success. Nil on failure |
+| `Error` | `*PluginError` | Populated on failure. Use `ErrorCodeUnauthorized` for bad credentials |
+
+## TokenSet
+
+Returned by `Login` and `RefreshToken`. Contains the issued tokens and their metadata.
+
+```go
+type TokenSet struct {
+    AccessToken  string
+    RefreshToken string
+    IDToken      string
+    TokenType    string
+    ExpiresIn    int64
+    Scope        string
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `AccessToken` | `string` | Bearer token sent by the client in `Authorization: Bearer <token>` |
+| `RefreshToken` | `string` | Opaque token used to obtain a new `AccessToken`. May be empty if the provider doesn't support refresh |
+| `IDToken` | `string` | OIDC ID token (JWT). Used by the panel for user identity display. May be empty for non-OIDC providers |
+| `TokenType` | `string` | Token type — always `"Bearer"` |
+| `ExpiresIn` | `int64` | Seconds until `AccessToken` expires. The panel uses this to schedule proactive refresh |
+| `Scope` | `string` | Space-separated OAuth scopes granted (e.g. `"openid profile email"`). May be empty |
+
+## TokenClaims
+
+Returned by `ValidateToken`. Contains the trusted identity context extracted from a verified token.
+The platform injects these claims into every authenticated request's context.
+
+```go
+type TokenClaims struct {
+    Subject string
+    Email   string
+    Roles   []string
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Subject` | `string` | Unique, stable user identifier — the OIDC `sub` claim. Used for attribution and stored as the user reference in the platform database |
+| `Email` | `string` | User's email address. May be empty if the provider doesn't expose it |
+| `Roles` | `[]string` | User's roles. Used throughout the platform for RBAC: nav item visibility, middleware decisions, route access control |
+
+<Callout type="warning" title="Always use Subject, not Email, as the user ID">
+Email addresses can change. The `Subject` field is the stable, unique identifier the platform uses
+to reference a user. Never use `Email` as a user key.
+</Callout>
+
+## Registration
+
+### RegisterRequest
+
+```go
+type RegisterRequest struct {
+    Username  string
+    Email     string
+    Password  string
+    FirstName string
+    LastName  string
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Username` | `string` | Desired username. Plugin enforces uniqueness and character restrictions |
+| `Email` | `string` | User's email address. Plugin validates format and uniqueness |
+| `Password` | `string` | Plaintext password. Plugin must hash before storage |
+| `FirstName` | `string` | Given name. May be empty |
+| `LastName` | `string` | Family name. May be empty |
+
+### RegisterResponse
+
+```go
+type RegisterResponse struct {
+    UserID string
+    Error  *PluginError
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `UserID` | `string` | Newly created user's unique ID. Empty on failure |
+| `Error` | `*PluginError` | Use `ErrorCodeConflict` when username/email already taken. Use `ErrorCodeNotSupported` if self-registration is not allowed |
+
+## User Lookup
+
+### GetUserRequest
+
+```go
+type GetUserRequest struct {
+    UserID string
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `UserID` | `string` | Unique identifier of the user to fetch. Same as `TokenClaims.Subject` |
+
+### GetUserResponse
+
+```go
+type GetUserResponse struct {
+    UserID   string
+    Username string
+    Email    string
+    Error    *PluginError
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `UserID` | `string` | Echoed from the request. Empty on failure |
+| `Username` | `string` | User's username. Empty on failure |
+| `Email` | `string` | User's email. Empty on failure or if not available |
+| `Error` | `*PluginError` | Use `ErrorCodeNotFound` if the user ID doesn't exist. Use `ErrorCodeNotSupported` if not implemented |
+
+## Token Validation
+
+### ValidateTokenRequest
+
+```go
+type ValidateTokenRequest struct {
+    Token string
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Token` | `string` | Raw bearer token without the `"Bearer "` prefix. The platform strips it before forwarding |
+
+### ValidateTokenResponse
+
+```go
+type ValidateTokenResponse struct {
+    Claims *TokenClaims
+    Error  *PluginError
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Claims` | `*TokenClaims` | Verified claims from the token. Nil on failure |
+| `Error` | `*PluginError` | Use `ErrorCodeUnauthorized` for expired tokens, invalid signatures, or revoked tokens |
+
+<Callout type="warning" title="ValidateToken is the hot path">
+`ValidateToken` is called on every authenticated request. Never make uncached network calls here.
+See [Token Validation](../idp-token-validation) for the JWKS caching pattern.
+</Callout>
+
+## Token Refresh
+
+### RefreshTokenRequest
+
+```go
+type RefreshTokenRequest struct {
+    RefreshToken string
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `RefreshToken` | `string` | The refresh token previously issued in a `TokenSet` |
+
+### RefreshTokenResponse
+
+```go
+type RefreshTokenResponse struct {
+    Token *TokenSet
+    Error *PluginError
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Token` | `*TokenSet` | New token set with a fresh `AccessToken`. Nil on failure |
+| `Error` | `*PluginError` | Use `ErrorCodeUnauthorized` if the refresh token is expired or revoked |
+
+## OIDC Configuration
+
+### OIDCConfig
+
+Returned by `GetOIDCConfig`. Used by the panel to initiate the OIDC redirect flow.
+
+```go
+type OIDCConfig struct {
+    Authority string
+    ClientID  string
+    JwksURI   string
+    Scopes    []string
+    AuthMode  string
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Authority` | `string` | OIDC issuer URL (e.g. `https://auth.example.com/realms/myrealm`). The panel appends `/.well-known/openid-configuration` to discover endpoints |
+| `ClientID` | `string` | OAuth2 client ID registered with the provider for the panel application |
+| `JwksURI` | `string` | URL to the provider's JWKS endpoint. Used for local JWT signature verification |
+| `Scopes` | `[]string` | OAuth scopes to request. Minimum: `["openid", "profile", "email"]` |
+| `AuthMode` | `string` | `"headless"` for username/password form; `"redirect"` for OIDC redirect flow |
+
+Only needed for redirect-mode IDP plugins. Return `ErrorCodeNotSupported` from `GetOIDCConfig` if
+your plugin is headless-only.

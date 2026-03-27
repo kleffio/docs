@@ -1,0 +1,479 @@
+export const metadata = {
+  title: "Authoring a Plugin",
+  description: "Step-by-step guide to writing, testing, and publishing a Kleff plugin.",
+};
+
+# Authoring a Plugin
+
+This guide walks through creating a Kleff IDP plugin from scratch. The same
+pattern applies to future plugin types — only the proto service changes.
+
+## Prerequisites
+
+- Docker (for local testing)
+- Go 1.23+ (for a Go plugin) or any language with gRPC support
+- [`grpcurl`](https://github.com/fullstorydev/grpcurl) for manual testing
+- Access to the Kleff `platform/api/plugins/v1/` proto files
+
+## Directory Structure
+
+There is no enforced layout, but the recommended structure for a Go plugin is:
+
+```
+idp-myprovider/
+  kleff-plugin.json      ← plugin manifest (required)
+  Dockerfile
+  README.md
+  go.mod
+  cmd/plugin/main.go     ← entrypoint
+  internal/
+    core/
+      domain/            ← pure types and sentinel errors
+      ports/             ← outbound interface
+      application/       ← use-case service
+    adapters/
+      grpc/              ← inbound gRPC adapter
+      myprovider/        ← outbound HTTP client
+```
+
+## Step 1 — Write the Manifest
+
+Create `kleff-plugin.json` at the root of your plugin directory:
+
+```json
+{
+  "id": "idp-myprovider",
+  "name": "MyProvider",
+  "type": "idp",
+  "description": "Connect Kleff to MyProvider for SSO.",
+  "tags": ["sso", "enterprise"],
+  "author": "Your Name",
+  "repo": "https://github.com/you/idp-myprovider",
+  "image": "ghcr.io/you/idp-myprovider",
+  "version": "1.0.0",
+  "minKleffVersion": "0.5.0",
+  "license": "MIT",
+  "verified": false,
+  "capabilities": ["identity.provider"],
+  "config": [
+    {
+      "key": "MYPROVIDER_DOMAIN",
+      "label": "Domain",
+      "description": "Your MyProvider tenant domain.",
+      "type": "string",
+      "required": true
+    },
+    {
+      "key": "MYPROVIDER_CLIENT_SECRET",
+      "label": "Client Secret",
+      "type": "secret",
+      "required": true
+    },
+    {
+      "key": "AUTH_MODE",
+      "label": "Login Mode",
+      "type": "select",
+      "options": ["headless", "redirect"],
+      "required": false,
+      "default": "redirect"
+    }
+  ]
+}
+```
+
+**Config field types:**
+
+| Type      | UI control          | Notes                                             |
+|-----------|---------------------|---------------------------------------------------|
+| `string`  | Text input          |                                                   |
+| `url`     | URL input           | Validated as a URL                                |
+| `secret`  | Password input      | Stored encrypted, never returned by the API       |
+| `select`  | Dropdown            | Requires an `options` array                       |
+| `boolean` | Toggle              |                                                   |
+| `number`  | Number input        |                                                   |
+
+## Step 2 — Implement the gRPC Service
+
+Copy the proto files from `platform/api/plugins/v1/` into your plugin repo, or
+reference them via a `replace` directive in `go.mod`.
+
+<Callout type="info" title="Every plugin must implement Health">
+The platform polls `PluginHealth/Health` every 30 seconds. A plugin that does not
+respond within 5 seconds is marked `ERROR` and the platform attempts a restart.
+</Callout>
+
+### Domain types
+
+```go
+// internal/core/domain/types.go
+package domain
+
+type TokenSet struct {
+    AccessToken  string
+    RefreshToken string
+    IDToken      string
+    TokenType    string
+    ExpiresIn    int64
+    Scope        string
+}
+
+type TokenClaims struct {
+    Subject string
+    Email   string
+    Roles   []string
+}
+
+type RegisterRequest struct {
+    Username  string
+    Email     string
+    Password  string
+    FirstName string
+    LastName  string
+}
+```
+
+### Domain errors
+
+```go
+// internal/core/domain/errors.go
+package domain
+
+import "errors"
+
+type ErrUnauthorized struct{ Msg string }
+func (e *ErrUnauthorized) Error() string { return e.Msg }
+
+type ErrConflict struct{ Msg string }
+func (e *ErrConflict) Error() string { return e.Msg }
+
+func IsUnauthorized(err error) bool {
+    var e *ErrUnauthorized
+    return errors.As(err, &e)
+}
+
+func IsConflict(err error) bool {
+    var e *ErrConflict
+    return errors.As(err, &e)
+}
+```
+
+### Outbound port
+
+```go
+// internal/core/ports/provider.go
+package ports
+
+import (
+    "context"
+    "github.com/you/idp-myprovider/internal/core/domain"
+)
+
+type IDPProvider interface {
+    Login(ctx context.Context, username, password string) (*domain.TokenSet, error)
+    Register(ctx context.Context, req domain.RegisterRequest) (string, error)
+    ValidateToken(ctx context.Context, rawToken string) (*domain.TokenClaims, error)
+    RefreshToken(ctx context.Context, refreshToken string) (*domain.TokenSet, error)
+}
+```
+
+### Application service
+
+```go
+// internal/core/application/service.go
+package application
+
+import (
+    "context"
+    "github.com/you/idp-myprovider/internal/core/domain"
+    "github.com/you/idp-myprovider/internal/core/ports"
+)
+
+type Service struct{ provider ports.IDPProvider }
+
+func New(p ports.IDPProvider) *Service { return &Service{provider: p} }
+
+func (s *Service) Login(ctx context.Context, u, p string) (*domain.TokenSet, error) {
+    return s.provider.Login(ctx, u, p)
+}
+
+func (s *Service) Register(ctx context.Context, req domain.RegisterRequest) (string, error) {
+    return s.provider.Register(ctx, req)
+}
+```
+
+### Inbound gRPC adapter
+
+```go
+// internal/adapters/grpc/server.go
+package grpc
+
+import (
+    "context"
+    pluginsv1 "github.com/kleffio/plugin-sdk/v1"
+    "github.com/you/idp-myprovider/internal/core/application"
+    "github.com/you/idp-myprovider/internal/core/domain"
+)
+
+type Server struct {
+    pluginsv1.UnimplementedIdentityPluginServer
+    pluginsv1.UnimplementedPluginHealthServer
+    svc *application.Service
+}
+
+func New(svc *application.Service) *Server { return &Server{svc: svc} }
+
+func (s *Server) Health(_ context.Context, _ *pluginsv1.HealthRequest) (*pluginsv1.HealthResponse, error) {
+    return &pluginsv1.HealthResponse{Status: pluginsv1.HealthStatusHealthy}, nil
+}
+
+func (s *Server) Login(ctx context.Context, req *pluginsv1.LoginRequest) (*pluginsv1.LoginResponse, error) {
+    tok, err := s.svc.Login(ctx, req.Username, req.Password)
+    if err != nil {
+        return &pluginsv1.LoginResponse{Error: toErr(err)}, nil
+    }
+    return &pluginsv1.LoginResponse{
+        Token: &pluginsv1.TokenSet{
+            AccessToken:  tok.AccessToken,
+            RefreshToken: tok.RefreshToken,
+            ExpiresIn:    tok.ExpiresIn,
+        },
+    }, nil
+}
+
+func (s *Server) Register(ctx context.Context, req *pluginsv1.RegisterRequest) (*pluginsv1.RegisterResponse, error) {
+    userID, err := s.svc.Register(ctx, domain.RegisterRequest{
+        Username: req.Username, Email: req.Email, Password: req.Password,
+        FirstName: req.FirstName, LastName: req.LastName,
+    })
+    if err != nil {
+        return &pluginsv1.RegisterResponse{Error: toErr(err)}, nil
+    }
+    return &pluginsv1.RegisterResponse{UserID: userID}, nil
+}
+
+func (s *Server) GetUser(_ context.Context, _ *pluginsv1.GetUserRequest) (*pluginsv1.GetUserResponse, error) {
+    return &pluginsv1.GetUserResponse{
+        Error: &pluginsv1.PluginError{Code: pluginsv1.ErrorCodeNotSupported},
+    }, nil
+}
+
+func toErr(err error) *pluginsv1.PluginError {
+    switch {
+    case domain.IsUnauthorized(err):
+        return &pluginsv1.PluginError{Code: pluginsv1.ErrorCodeUnauthorized, Message: err.Error()}
+    case domain.IsConflict(err):
+        return &pluginsv1.PluginError{Code: pluginsv1.ErrorCodeConflict, Message: err.Error()}
+    default:
+        return &pluginsv1.PluginError{Code: pluginsv1.ErrorCodeInternal, Message: err.Error()}
+    }
+}
+```
+
+**Error mapping:**
+
+| Situation                   | Code                    |
+|-----------------------------|-------------------------|
+| Bad credentials / bad token | `ErrorCodeUnauthorized` |
+| User already exists         | `ErrorCodeConflict`     |
+| Feature not implemented     | `ErrorCodeNotSupported` |
+| Unexpected failure          | Return `nil, err`       |
+
+## Step 3 — Wire Everything in `main.go`
+
+```go
+// cmd/plugin/main.go
+package main
+
+import (
+    "log/slog"
+    "net"
+    "os"
+    "os/signal"
+    "syscall"
+
+    pluginsv1 "github.com/kleffio/plugin-sdk/v1"
+    grpcadapter "github.com/you/idp-myprovider/internal/adapters/grpc"
+    "github.com/you/idp-myprovider/internal/adapters/myprovider"
+    "github.com/you/idp-myprovider/internal/core/application"
+    "google.golang.org/grpc"
+)
+
+func main() {
+    logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+    provider := myprovider.New(myprovider.Config{
+        Domain:       mustEnv("MYPROVIDER_DOMAIN"),
+        ClientSecret: mustEnv("MYPROVIDER_CLIENT_SECRET"),
+    })
+    svc := application.New(provider)
+    srv := grpcadapter.New(svc)
+
+    gs := grpc.NewServer()
+    pluginsv1.RegisterIdentityPluginServer(gs, srv)
+    pluginsv1.RegisterPluginHealthServer(gs, srv)
+
+    port := env("PLUGIN_PORT", "50051")
+    lis, err := net.Listen("tcp", ":"+port)
+    if err != nil {
+        logger.Error("listen failed", "error", err)
+        os.Exit(1)
+    }
+
+    go func() {
+        logger.Info("plugin listening", "port", port)
+        if err := gs.Serve(lis); err != nil {
+            logger.Error("gRPC error", "error", err)
+            os.Exit(1)
+        }
+    }()
+
+    stop := make(chan os.Signal, 1)
+    signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+    <-stop
+    gs.GracefulStop()
+}
+
+func env(k, d string) string {
+    if v := os.Getenv(k); v != "" { return v }
+    return d
+}
+
+func mustEnv(k string) string {
+    if v := os.Getenv(k); v != "" { return v }
+    slog.Error("required env var not set", "key", k)
+    os.Exit(1)
+    return ""
+}
+```
+
+## Step 4 — Dockerfile
+
+```dockerfile
+FROM golang:1.23-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /plugin ./cmd/plugin
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata
+COPY --from=builder /plugin /plugin
+EXPOSE 50051
+ENTRYPOINT ["/plugin"]
+```
+
+**Docker image requirements:**
+
+- Must expose port `50051` (or respect `PLUGIN_PORT`).
+- Must respond to `Health` within 5 seconds of start.
+- Image must be publicly pullable.
+- Use a minimal base image (`alpine`, `distroless`).
+- Tag releases with semantic versions (e.g., `1.2.0`).
+
+## Step 5 — Test Locally
+
+```bash
+# Build
+docker build -t ghcr.io/you/idp-myprovider:dev .
+
+# Run
+docker run --rm -p 50051:50051 \
+  -e MYPROVIDER_DOMAIN=example.com \
+  -e MYPROVIDER_CLIENT_SECRET=secret \
+  ghcr.io/you/idp-myprovider:dev
+
+# Health check
+grpcurl -plaintext localhost:50051 kleff.plugins.v1.PluginHealth/Health
+
+# Test login
+grpcurl -plaintext \
+  -d '{"username":"alice@example.com","password":"hunter2"}' \
+  localhost:50051 kleff.plugins.v1.IdentityPlugin/Login
+
+# Test register
+grpcurl -plaintext \
+  -d '{"username":"bob","email":"bob@example.com","password":"s3cure"}' \
+  localhost:50051 kleff.plugins.v1.IdentityPlugin/Register
+```
+
+### Test against a local Kleff instance
+
+1. Set `RUNTIME_PROVIDER=manual` in your local platform config.
+2. Start your plugin container on the same Docker network as the platform.
+3. Set `PLUGIN_IDP_CUSTOM_ADDR=localhost:50051`.
+4. In the panel, go to **Admin → Plugins → Install**.
+
+## Step 6 — Publish
+
+```bash
+# Push the image
+docker push ghcr.io/you/idp-myprovider:1.0.0
+
+# Add your plugin to the registry
+# Fork github.com/kleff/plugin-registry, add your manifest to plugins.json, open a PR
+```
+
+**Registry review checklist:**
+- Image is publicly pullable and free of known critical CVEs.
+- `Health` RPC responds correctly.
+- `required: true` config fields are genuinely required.
+- Secret fields use `"type": "secret"`.
+- `repo` URL points to public source code.
+- Plugin does not embed Kleff platform code.
+
+Plugins are granted the `"verified": true` badge after the Kleff team audits
+the source code. All official Kleff plugins are verified.
+
+## Python Example
+
+If you prefer Python, the same pattern works with `grpcio`:
+
+```python
+# plugin.py
+import os
+import grpc
+from concurrent import futures
+import idp_pb2, idp_pb2_grpc, common_pb2
+
+class IdentityPlugin(idp_pb2_grpc.IdentityPluginServicer):
+    def Login(self, request, context):
+        try:
+            token = my_provider_login(request.username, request.password)
+            return idp_pb2.LoginResponse(
+                token=idp_pb2.TokenSet(
+                    access_token=token["access_token"],
+                    expires_in=token["expires_in"],
+                )
+            )
+        except UnauthorizedError as e:
+            return idp_pb2.LoginResponse(
+                error=common_pb2.PluginError(
+                    code=common_pb2.ErrorCode.UNAUTHORIZED,
+                    message=str(e),
+                )
+            )
+
+    def Health(self, request, context):
+        return common_pb2.HealthResponse(status=common_pb2.HealthStatus.HEALTHY)
+
+def serve():
+    port = os.environ.get("PLUGIN_PORT", "50051")
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    idp_pb2_grpc.add_IdentityPluginServicer_to_server(IdentityPlugin(), server)
+    server.add_insecure_port(f"[::]:{port}")
+    server.start()
+    server.wait_for_termination()
+
+if __name__ == "__main__":
+    serve()
+```
+
+## Platform-Injected Variables
+
+Two variables are always set by the platform, regardless of the manifest:
+
+| Variable      | Value                              |
+|---------------|------------------------------------|
+| `PLUGIN_ID`   | Plugin `id` from the manifest      |
+| `PLUGIN_PORT` | Port the plugin should listen on   |

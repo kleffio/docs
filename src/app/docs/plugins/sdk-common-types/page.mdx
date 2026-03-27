@@ -1,0 +1,325 @@
+export const metadata = {
+  title: "SDK Common Types",
+  description: "Reference for health, capabilities, error, middleware, UI, and HTTP route types in the Kleff plugin SDK.",
+};
+
+# SDK Common Types
+
+<Badge variant="stable">stable</Badge>
+
+This page documents the non-IDP types used across all plugin capabilities. For identity provider
+types see [SDK IDP Types](../sdk-idp-types).
+
+## Health & Status Types
+
+Every plugin must implement the `PluginHealth` service. The platform polls `Health` every 30
+seconds and uses the response to manage plugin state.
+
+```go
+type HealthRequest struct{}
+
+type HealthResponse struct {
+    Status  HealthStatus
+    Message string
+}
+
+type HealthStatus int32
+
+const (
+    HealthStatusUnknown   HealthStatus = 0
+    HealthStatusHealthy   HealthStatus = 1
+    HealthStatusDegraded  HealthStatus = 2
+    HealthStatusUnhealthy HealthStatus = 3
+)
+```
+
+### HealthResponse Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Status` | `HealthStatus` | Current operational status |
+| `Message` | `string` | Optional human-readable note shown in the admin panel |
+
+### HealthStatus Values
+
+| Constant | Value | Platform Reaction |
+|----------|-------|------------------|
+| `HealthStatusUnknown` | `0` | Avoid — treated as unhealthy |
+| `HealthStatusHealthy` | `1` | Green indicator, reset failure counter |
+| `HealthStatusDegraded` | `2` | Yellow warning, traffic continues, no restart |
+| `HealthStatusUnhealthy` | `3` | Red indicator, increments failure counter |
+
+**DEGRADED** — Plugin is alive but an internal dependency is temporarily unavailable (e.g. can't
+reach the identity provider). Traffic continues. Populate `Message` so operators can diagnose.
+
+**UNHEALTHY** — Plugin cannot serve requests. Three consecutive `UNHEALTHY` responses trigger an
+automatic restart.
+
+<Callout type="warning" title="Restart threshold">
+Three consecutive unhealthy health polls (regardless of status — timeout, UNHEALTHY, or no
+response) cause the platform to restart the plugin. Don't return UNHEALTHY for transient states;
+use DEGRADED instead.
+</Callout>
+
+## Capabilities Types
+
+```go
+type GetCapabilitiesRequest struct{}
+
+type GetCapabilitiesResponse struct {
+    Capabilities []string
+}
+
+const (
+    CapabilityIdentityProvider = "identity.provider"
+    CapabilityAPIMiddleware    = "api.middleware"
+    CapabilityUIManifest       = "ui.manifest"
+    CapabilityAPIRoutes        = "api.routes"
+)
+```
+
+### Capability Constants
+
+| Constant | Value | What It Enables |
+|----------|-------|-----------------|
+| `CapabilityIdentityProvider` | `"identity.provider"` | Plugin handles login, registration, token validation, and OIDC |
+| `CapabilityAPIMiddleware` | `"api.middleware"` | Plugin is called before every authenticated request |
+| `CapabilityUIManifest` | `"ui.manifest"` | Plugin contributes nav items and settings pages to the panel |
+| `CapabilityAPIRoutes` | `"api.routes"` | Plugin owns and handles specific HTTP routes |
+
+```go
+func (s *Server) GetCapabilities(_ context.Context, _ *pluginsv1.GetCapabilitiesRequest) (*pluginsv1.GetCapabilitiesResponse, error) {
+    return &pluginsv1.GetCapabilitiesResponse{
+        Capabilities: []string{
+            pluginsv1.CapabilityIdentityProvider,
+            pluginsv1.CapabilityUIManifest,
+        },
+    }, nil
+}
+```
+
+## Error Types
+
+Application-level errors are returned inside response structs — **not** as Go-level errors from
+the RPC handler.
+
+```go
+type PluginError struct {
+    Code    ErrorCode
+    Message string
+}
+
+type ErrorCode int32
+
+const (
+    ErrorCodeUnknown         ErrorCode = 0
+    ErrorCodeInvalidArgument ErrorCode = 1
+    ErrorCodeUnauthorized    ErrorCode = 2
+    ErrorCodeConflict        ErrorCode = 3
+    ErrorCodeNotFound        ErrorCode = 4
+    ErrorCodeInternal        ErrorCode = 5
+    ErrorCodeNotSupported    ErrorCode = 6
+)
+```
+
+### PluginError Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Code` | `ErrorCode` | Machine-readable classification. Determines the HTTP status code returned to the client |
+| `Message` | `string` | Human-readable description. May be shown to end users |
+
+### ErrorCode Values
+
+| Constant | Value | HTTP Equivalent | When to Return |
+|----------|-------|-----------------|----------------|
+| `ErrorCodeUnknown` | `0` | `500` | Default zero value — use `INTERNAL` instead |
+| `ErrorCodeInvalidArgument` | `1` | `400` | Malformed or missing request fields |
+| `ErrorCodeUnauthorized` | `2` | `401` | Bad credentials, expired or invalid token |
+| `ErrorCodeConflict` | `3` | `409` | Resource already exists (e.g. duplicate username) |
+| `ErrorCodeNotFound` | `4` | `404` | Requested resource does not exist |
+| `ErrorCodeInternal` | `5` | `500` | Unexpected internal failure |
+| `ErrorCodeNotSupported` | `6` | `501` | RPC not implemented by this plugin |
+
+### Returning errors correctly
+
+```go
+// Correct: return plugin error inside response, nil Go error
+return &pluginsv1.LoginResponse{
+    Error: &pluginsv1.PluginError{
+        Code:    pluginsv1.ErrorCodeUnauthorized,
+        Message: "invalid credentials",
+    },
+}, nil
+
+// Wrong: returning a Go-level error causes the platform to treat it as a transport failure
+return nil, fmt.Errorf("invalid credentials")
+```
+
+<Callout type="warning" title="NOT_SUPPORTED vs Go errors">
+For unimplemented RPCs, return a response with `ErrorCodeNotSupported` and a `nil` Go error.
+A non-nil Go error at the gRPC level triggers restart logic and alerting.
+</Callout>
+
+## Middleware Types
+
+Used by the `PluginMiddleware` service. Requires `api.middleware` capability.
+
+```go
+type MiddlewareRequest struct {
+    UserID  string
+    Roles   []string
+    Method  string
+    Path    string
+    Headers map[string]string
+}
+
+type MiddlewareResponse struct {
+    Allow bool
+    Error *PluginError
+}
+```
+
+### MiddlewareRequest Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `UserID` | `string` | Verified user identity (`TokenClaims.Subject`) — already authenticated |
+| `Roles` | `[]string` | User's roles from validated token claims |
+| `Method` | `string` | HTTP method: `GET`, `POST`, etc. |
+| `Path` | `string` | Full URL path starting with `/`. No query string |
+| `Headers` | `map[string]string` | Request headers. Multi-value headers joined with commas |
+
+### MiddlewareResponse Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Allow` | `bool` | `true` = forward request; `false` = reject with derived status code |
+| `Error` | `*PluginError` | Populated when `Allow: false`. `Code` maps to HTTP status |
+
+`UserID` and `Roles` are pre-verified by the platform before `OnRequest` is called. Middleware
+does not re-validate the token — it only makes authorization decisions.
+
+## UI Types
+
+Used by the `PluginUI` service. Requires `ui.manifest` capability.
+
+```go
+type NavItem struct {
+    Label      string
+    Icon       string
+    Path       string
+    Permission string
+    Children   []*NavItem
+}
+
+type SettingsPage struct {
+    Label     string
+    Path      string
+    IframeURL string
+}
+
+type UIManifest struct {
+    PluginID      string
+    NavItems      []*NavItem
+    SettingsPages []*SettingsPage
+}
+```
+
+### NavItem Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Label` | `string` | Sidebar display text. Keep short (1–3 words) |
+| `Icon` | `string` | Lucide icon name in PascalCase (e.g. `"Shield"`, `"Users"`) |
+| `Path` | `string` | Full panel route path starting with `/` |
+| `Permission` | `string` | Required role. Empty = visible to all authenticated users |
+| `Children` | `[]*NavItem` | Nested items rendered as a collapsible sub-menu (max 2 levels) |
+
+### SettingsPage Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Label` | `string` | Name shown in settings navigation |
+| `Path` | `string` | Route segment appended to `/settings/` |
+| `IframeURL` | `string` | If set, page renders an embedded iframe at this URL |
+
+### UIManifest Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `PluginID` | `string` | Must match the plugin's registered `id` |
+| `NavItems` | `[]*NavItem` | Top-level sidebar nav items |
+| `SettingsPages` | `[]*SettingsPage` | Settings pages contributed by this plugin |
+
+## HTTP Route Types
+
+Used by the `PluginHTTP` service. Requires `api.routes` capability.
+
+```go
+type Route struct {
+    Method string
+    Path   string
+    Public bool
+}
+
+type HTTPRequest struct {
+    Method   string
+    Path     string
+    RawQuery string
+    Headers  map[string]string
+    Body     []byte
+    UserID   string
+    Roles    []string
+}
+
+type HTTPResponse struct {
+    StatusCode int
+    Headers    map[string]string
+    Body       []byte
+}
+
+type GetRoutesRequest struct{}
+type GetRoutesResponse struct{ Routes []*Route }
+
+type HandleHTTPRequest struct{ Request *HTTPRequest }
+type HandleHTTPResponse struct{ Response *HTTPResponse }
+```
+
+### Route Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Method` | `string` | HTTP method or `"*"` for any method |
+| `Path` | `string` | Exact path or prefix ending in `/*` |
+| `Public` | `bool` | If `true`, skip token validation. `UserID`/`Roles` will be empty |
+
+### Path Matching
+
+```
+Route: GET /api/v1/plugin/users        → matches only GET /api/v1/plugin/users
+Route: * /api/v1/plugin/users          → matches any method on that path
+Route: GET /api/v1/plugin/*            → matches any GET under /api/v1/plugin/
+```
+
+Exact paths take precedence over prefix matches. Specific methods take precedence over `*`.
+
+### HTTPRequest Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Method` | `string` | HTTP method |
+| `Path` | `string` | Full URL path |
+| `RawQuery` | `string` | Query string without leading `?` |
+| `Headers` | `map[string]string` | Request headers (canonical title case keys) |
+| `Body` | `[]byte` | Raw request body. Empty for GET/HEAD/DELETE |
+| `UserID` | `string` | Authenticated user ID. Empty for `Public` routes |
+| `Roles` | `[]string` | User roles. Empty for `Public` routes |
+
+### HTTPResponse Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `StatusCode` | `int` | HTTP status code (200, 201, 400, 404, 500, etc.) |
+| `Headers` | `map[string]string` | Response headers. Always set `Content-Type` |
+| `Body` | `[]byte` | Raw response body |

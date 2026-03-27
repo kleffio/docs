@@ -1,0 +1,244 @@
+export const metadata = {
+  title: "Plugin Security",
+  description: "Security model for Kleff plugins — network isolation, secret encryption, token flow, and admin authorization.",
+};
+
+# Plugin Security
+
+<Badge variant="stable">Platform Feature</Badge>
+
+This page describes the security model that governs Kleff plugins: how communication is isolated,
+how secrets are protected at rest and in transit, how tokens are validated, and what permissions
+are required to manage plugins.
+
+## Network Isolation
+
+Plugins run as separate containers on a private Docker network (`kleff` by default) or in a
+Kubernetes cluster network. gRPC connections between the platform and plugins are **internal-only**
+— plugin ports are never exposed to the public internet.
+
+```
+ Public Internet
+        │
+        ▼
+   Load Balancer / Ingress
+        │
+        ▼
+  Platform API (port 8080)
+        │ private Docker/k8s network
+        ├──► Plugin: kleff-idp-keycloak:50051
+        ├──► Plugin: kleff-billing-stripe:50051
+        └──► Plugin: kleff-notify-slack:50051
+```
+
+No plugin port is published to the host. If an attacker gains access to the public internet but
+not the container network, they cannot reach the plugin gRPC endpoints.
+
+<Callout type="warning" title="Docker socket access">
+The Docker runtime requires access to `/var/run/docker.sock` on the host. This is a privileged
+socket — anyone with access to it can control all containers on the host. In production, prefer the
+Kubernetes runtime (with scoped RBAC) or restrict the Docker socket with an authorization proxy.
+</Callout>
+
+## Secret Encryption
+
+Config fields declared as `"type": "secret"` in the plugin manifest are stored encrypted at rest
+using **AES-256-GCM**.
+
+### Encryption details
+
+| Property | Value |
+|----------|-------|
+| Algorithm | AES-256-GCM (authenticated encryption) |
+| Key size | 256 bits (32 bytes) |
+| Key derivation | SHA-256 of the `SECRET_KEY` environment variable |
+| Nonce | 12-byte random nonce, unique per encryption operation |
+| Storage | Encrypted JSON in the `secrets` column of the `plugins` table |
+
+### Secret lifecycle
+
+```
+Admin enters secret in settings form
+        │
+        ▼
+Platform separates from plain config
+        │
+        ▼
+AES-256-GCM encrypt with platform SECRET_KEY
+        │
+        ▼
+Store encrypted blob in DB (secrets column)
+        │
+        ▼  (at deploy time only)
+Decrypt in memory
+        │
+        ▼
+Inject as environment variable into plugin container
+        │
+        ▼
+Plugin reads env var at startup
+```
+
+### What is never exposed
+
+- Secret values are **never** returned in any API response — not even to admins
+- The settings form shows a masked placeholder (e.g. `••••••••`) when a secret is already set
+- Secret values are **not** logged by the platform
+- Encrypted blobs are only decrypted in memory immediately before container deployment
+
+### Key rotation
+
+To rotate the `SECRET_KEY`:
+
+1. Export all plugin configs (non-secret fields only) via `GET /api/v1/admin/plugins`
+2. Change `SECRET_KEY` on the platform
+3. Re-enter all secret fields for each installed plugin via `PATCH /api/v1/admin/plugins/{id}/config`
+
+There is no automated key rotation tooling — this is a manual process.
+
+## Authentication & Token Flow
+
+### Token validation path
+
+Every authenticated HTTP request goes through token validation before reaching any handler:
+
+```
+Incoming request with Authorization: Bearer <token>
+        │
+        ▼
+RequireAuth middleware
+        │
+        ▼
+PluginTokenVerifier.Verify(token)
+        │
+        ▼
+Manager.ValidateToken(token)
+        │
+        ▼
+Active IDP plugin: IdentityPlugin/ValidateToken gRPC
+        │
+        ├── Success: inject {UserID, Roles} into request context
+        │
+        └── Failure: return 401 Unauthorized
+```
+
+The platform **delegates all token validation** to the active IDP plugin. The platform itself
+never inspects the token contents — it trusts the claims returned by the plugin.
+
+### Token claims and RBAC
+
+The IDP plugin returns `TokenClaims`:
+
+```go
+type TokenClaims struct {
+    Subject string   // stable user identity (stored, used for attribution)
+    Email   string   // for display
+    Roles   []string // used for RBAC throughout the platform
+}
+```
+
+Roles from `TokenClaims.Roles` are used for:
+
+- Platform admin checks (`admin` role required for all `/api/v1/admin/*` routes)
+- Plugin middleware decisions (via `MiddlewareRequest.Roles`)
+- UI nav item visibility (via `NavItem.Permission`)
+
+### Middleware security
+
+If any plugin with `api.middleware` capability returns `Allow: false`, the request is rejected
+with HTTP 403 before reaching any platform handler. This allows plugins to implement additional
+authorization policies layered on top of the platform's own RBAC.
+
+The platform calls all middleware plugins **after** token validation. Middleware receives
+pre-verified `UserID` and `Roles` — it does not need to re-validate the token.
+
+## Admin Authorization
+
+Plugin management endpoints require the `admin` role:
+
+| Endpoint | Required Role |
+|----------|--------------|
+| `GET /api/v1/admin/plugins` | `admin` |
+| `POST /api/v1/admin/plugins` | `admin` |
+| `DELETE /api/v1/admin/plugins/{id}` | `admin` |
+| `PATCH /api/v1/admin/plugins/{id}/config` | `admin` |
+| `POST /api/v1/admin/plugins/{id}/enable` | `admin` |
+| `POST /api/v1/admin/plugins/{id}/disable` | `admin` |
+| `POST /api/v1/admin/plugins/{id}/set-active` | `admin` |
+| `GET /api/v1/admin/plugins/catalog` | `admin` |
+
+The `GET /api/v1/plugins/ui-manifests` endpoint only requires a valid token (any role) — it
+returns the aggregated UI contributions for the logged-in user, filtered by the `Permission` field
+on each `NavItem`.
+
+## Plugin Code Isolation
+
+Plugins cannot modify the platform's core behavior. They can only interact through the defined
+gRPC interfaces:
+
+| Plugin Can | Plugin Cannot |
+|------------|--------------|
+| Deny requests via middleware | Modify request/response bodies in transit |
+| Validate or reject tokens | Issue tokens that bypass ValidateToken |
+| Serve routes it declares | Claim routes it didn't declare via GetRoutes |
+| Contribute nav items | Modify existing platform nav |
+| Read its own env vars | Read another plugin's env vars or secrets |
+| Make outbound network calls | Access the host filesystem |
+
+The container isolation boundary enforces this. A plugin has no access to the platform database,
+the Docker socket, or other plugin containers unless explicitly allowed through network policy.
+
+## Supply Chain Security
+
+### Image trust
+
+The platform pulls Docker images as specified in the manifest. There is no built-in image signing
+verification. Operators should:
+
+- Use images from trusted registries (GHCR, Docker Hub official images)
+- Prefer `verified` plugins (source-audited by the Kleff team)
+- Pin image digests in production rather than mutable tags
+- Run a container image scanner (Trivy, Grype) in your CI pipeline
+
+### Verified plugins
+
+Plugins with `"verified": true` in the registry have had their source code audited by the Kleff
+team. The audit checks:
+
+- No exfiltration of secrets or credentials
+- No unexpected outbound network calls
+- No embedded platform code
+- `required: true` config fields are genuinely required
+- `type: "secret"` used for all sensitive values
+
+### Plugin registry integrity
+
+The plugin catalog is fetched from GitHub (`plugin-registry` repository). In production, you can
+override the registry URL with `PLUGIN_REGISTRY_URL` to use a private registry under your control,
+allowing you to curate which plugins are available for installation.
+
+## Threat Model
+
+| Threat | Mitigation |
+|--------|-----------|
+| Compromised plugin binary | Network isolation limits blast radius; plugin cannot access DB or other containers |
+| Secrets leaked via API | Secrets never returned in API responses |
+| Secrets leaked from DB | AES-256-GCM encryption at rest |
+| Token forgery | Tokens validated by the IDP plugin on every request |
+| Privilege escalation via middleware | Middleware can only deny, not grant additional permissions |
+| Malicious plugin manifest | Admin approval required to install; verified badge for audited plugins |
+| Docker socket exposure | Use Kubernetes runtime or restrict socket with authorization proxy |
+
+## Security Checklist for Plugin Authors
+
+Before publishing a plugin, verify:
+
+- [ ] No hardcoded credentials in the image
+- [ ] All sensitive config fields use `"type": "secret"`
+- [ ] Plugin does not log secret env var values
+- [ ] Plugin makes network calls only to expected destinations
+- [ ] Plugin does not expose debug or admin endpoints on port 50051
+- [ ] Image is built from a minimal base (`alpine`, `distroless`)
+- [ ] Image passes a CVE scanner with no critical vulnerabilities
+- [ ] Docker image is built with `CGO_ENABLED=0` for static binaries (Go)
+- [ ] Source code is publicly available for verification

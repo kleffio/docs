@@ -1,0 +1,306 @@
+export const metadata = {
+  title: "IDP Token Validation",
+  description: "Deep dive into ValidateToken — JWKS caching, JWT verification, and mapping provider claims to TokenClaims.",
+};
+
+# IDP Token Validation
+
+<Badge variant="stable">Capability: identity.provider</Badge>
+
+`ValidateToken` is the most performance-critical RPC in the entire plugin system. The platform
+calls it on **every authenticated API request** to verify the bearer token and extract the user's
+identity. A slow `ValidateToken` adds latency to every request across the platform.
+
+## What ValidateToken Must Do
+
+1. Parse the JWT header to extract `alg` and `kid`
+2. Verify the algorithm matches what your provider uses (typically `RS256` or `HS256`)
+3. Fetch or look up the public key by `kid` from your JWKS cache
+4. Verify the token signature
+5. Check the `exp` claim — reject expired tokens
+6. Check the `nbf` / `iat` claims if your provider includes them
+7. Extract `sub`, `email`, and roles — return as `TokenClaims`
+
+## JWKS Caching
+
+If your provider uses asymmetric signing (RS256, ES256), you **must** cache the public keys
+fetched from the JWKS endpoint. Fetching JWKS on every validation call causes severe latency and
+will rate-limit your plugin at the provider.
+
+### Cache design
+
+A correct JWKS cache uses:
+- A read-write mutex for concurrent access
+- A `kid` → `*rsa.PublicKey` map
+- A `fetchedAt` timestamp
+- A configurable TTL (5–15 minutes is typical)
+
+On a cache hit with a valid TTL: return the key immediately (read lock only).
+On a cache miss or expired TTL: acquire a write lock, re-fetch JWKS, repopulate the map.
+
+```go
+type jwksCache struct {
+    mu        sync.RWMutex
+    keys      map[string]*rsa.PublicKey
+    fetchedAt time.Time
+    ttl       time.Duration
+    jwksURI   string
+}
+
+func (c *jwksCache) getKey(kid string) (*rsa.PublicKey, error) {
+    c.mu.RLock()
+    if time.Since(c.fetchedAt) < c.ttl {
+        key, ok := c.keys[kid]
+        c.mu.RUnlock()
+        if ok {
+            return key, nil
+        }
+        // kid not found in cache — fall through to refresh
+    } else {
+        c.mu.RUnlock()
+    }
+    return c.refresh(kid)
+}
+
+func (c *jwksCache) refresh(kid string) (*rsa.PublicKey, error) {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+
+    resp, err := http.Get(c.jwksURI)
+    if err != nil {
+        return nil, fmt.Errorf("fetching JWKS: %w", err)
+    }
+    defer resp.Body.Close()
+
+    var jwks struct {
+        Keys []struct {
+            Kid string `json:"kid"`
+            N   string `json:"n"`
+            E   string `json:"e"`
+        } `json:"keys"`
+    }
+    if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
+        return nil, fmt.Errorf("decoding JWKS: %w", err)
+    }
+
+    c.keys = make(map[string]*rsa.PublicKey)
+    for _, k := range jwks.Keys {
+        pub, err := parseRSAPublicKey(k.N, k.E)
+        if err != nil {
+            continue
+        }
+        c.keys[k.Kid] = pub
+    }
+    c.fetchedAt = time.Now()
+
+    key, ok := c.keys[kid]
+    if !ok {
+        return nil, fmt.Errorf("unknown key id: %s", kid)
+    }
+    return key, nil
+}
+```
+
+<Callout type="info" title="Force refresh on unknown kid">
+When you get a `kid` not in the cache, always try one forced refresh before returning an error.
+Providers rotate keys without warning — a miss might mean the cache is stale, not that the token
+is forged.
+</Callout>
+
+## Full ValidateToken Implementation
+
+```go
+func (s *Server) ValidateToken(ctx context.Context, req *pluginsv1.ValidateTokenRequest) (*pluginsv1.ValidateTokenResponse, error) {
+    claims, err := s.jwks.validateJWT(req.Token)
+    if err != nil {
+        return &pluginsv1.ValidateTokenResponse{
+            Error: &pluginsv1.PluginError{
+                Code:    pluginsv1.ErrorCodeUnauthorized,
+                Message: err.Error(),
+            },
+        }, nil
+    }
+    return &pluginsv1.ValidateTokenResponse{
+        Claims: &pluginsv1.TokenClaims{
+            Subject: claims.Subject,
+            Email:   claims.Email,
+            Roles:   claims.Roles,
+        },
+    }, nil
+}
+
+func (c *jwksCache) validateJWT(tokenStr string) (*parsedClaims, error) {
+    // 1. Parse JWT header to get kid and alg
+    parts := strings.Split(tokenStr, ".")
+    if len(parts) != 3 {
+        return nil, fmt.Errorf("malformed JWT")
+    }
+
+    var header struct {
+        Alg string `json:"alg"`
+        Kid string `json:"kid"`
+    }
+    headerBytes, _ := base64.RawURLEncoding.DecodeString(parts[0])
+    if err := json.Unmarshal(headerBytes, &header); err != nil {
+        return nil, fmt.Errorf("invalid JWT header")
+    }
+    if header.Alg != "RS256" {
+        return nil, fmt.Errorf("unsupported algorithm: %s", header.Alg)
+    }
+
+    // 2. Get public key from cache
+    pubKey, err := c.getKey(header.Kid)
+    if err != nil {
+        return nil, err
+    }
+
+    // 3. Verify signature
+    signingInput := parts[0] + "." + parts[1]
+    sig, _ := base64.RawURLEncoding.DecodeString(parts[2])
+    digest := sha256.Sum256([]byte(signingInput))
+    if err := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, digest[:], sig); err != nil {
+        return nil, fmt.Errorf("invalid signature")
+    }
+
+    // 4. Decode claims
+    claimsBytes, _ := base64.RawURLEncoding.DecodeString(parts[1])
+    var raw map[string]any
+    json.Unmarshal(claimsBytes, &raw)
+
+    // 5. Check expiry
+    if exp, ok := raw["exp"].(float64); ok {
+        if time.Now().Unix() > int64(exp) {
+            return nil, fmt.Errorf("token expired")
+        }
+    }
+
+    // 6. Map to claims (provider-specific — see below)
+    return mapClaims(raw), nil
+}
+```
+
+## TokenClaims Mapping
+
+`ValidateToken` must return `TokenClaims` with `Subject`, `Email`, and `Roles`. How you extract
+these depends on the provider.
+
+### Subject
+
+Always map from the `sub` claim — it's the stable, unique user identifier. Never use `email` as
+the subject; email addresses can change.
+
+### Email
+
+Map from the `email` claim. Standard across all OIDC-compliant providers. Some providers require
+the `email` scope to be requested for this claim to be included.
+
+### Roles
+
+Role claim location varies by provider:
+
+**Keycloak** — nested under `realm_access.roles`:
+
+```go
+type keycloakClaims struct {
+    Subject     string `json:"sub"`
+    Email       string `json:"email"`
+    RealmAccess struct {
+        Roles []string `json:"roles"`
+    } `json:"realm_access"`
+}
+```
+
+**Auth0** — injected via an Action into a custom namespace claim:
+
+```go
+type auth0Claims struct {
+    Subject string   `json:"sub"`
+    Email   string   `json:"email"`
+    Roles   []string `json:"https://your-app.example.com/roles"`
+}
+```
+
+**Generic JWT** — top-level `roles` array:
+
+```go
+type genericClaims struct {
+    Subject string   `json:"sub"`
+    Email   string   `json:"email"`
+    Roles   []string `json:"roles"`
+}
+```
+
+**Fallback** — extract from raw map when structure is unknown:
+
+```go
+func mapClaims(raw map[string]any) *parsedClaims {
+    subject, _ := raw["sub"].(string)
+    email, _   := raw["email"].(string)
+
+    var roles []string
+    if ra, ok := raw["realm_access"].(map[string]any); ok {
+        if r, ok := ra["roles"].([]any); ok {
+            for _, v := range r {
+                if s, ok := v.(string); ok {
+                    roles = append(roles, s)
+                }
+            }
+        }
+    } else if r, ok := raw["roles"].([]any); ok {
+        for _, v := range r {
+            if s, ok := v.(string); ok {
+                roles = append(roles, s)
+            }
+        }
+    }
+
+    return &parsedClaims{Subject: subject, Email: email, Roles: roles}
+}
+```
+
+<Callout type="info" title="Debugging claim mapping">
+If roles are missing after login, log the raw decoded JWT claims from your provider before mapping
+them. The claim key or nesting structure is almost always the cause.
+</Callout>
+
+## Performance Guidelines
+
+| Rule | Why |
+|------|-----|
+| Cache JWKS keys with a 5–15 minute TTL | Avoids network round-trips on every request |
+| Use `sync.RWMutex` — read lock for cache hits | Multiple concurrent requests can read keys simultaneously |
+| Force one refresh on unknown `kid` before failing | Handles key rotation without denying valid requests |
+| Pre-parse the public key to `*rsa.PublicKey` on cache load | Avoid re-parsing on every validation call |
+| Target < 1 ms for cached validations | ValidateToken is on the critical path of every request |
+
+## HS256 (Symmetric) Providers
+
+For providers using HS256 (symmetric HMAC signing), you don't need JWKS — you share a secret:
+
+```go
+func (s *Server) ValidateToken(_ context.Context, req *pluginsv1.ValidateTokenRequest) (*pluginsv1.ValidateTokenResponse, error) {
+    // Parse and verify HMAC-SHA256 signature
+    parts := strings.Split(req.Token, ".")
+    if len(parts) != 3 {
+        return unauthorized("malformed token"), nil
+    }
+
+    signingInput := parts[0] + "." + parts[1]
+    mac := hmac.New(sha256.New, s.secret)
+    mac.Write([]byte(signingInput))
+    expected := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+
+    actual, _ := base64.RawURLEncoding.DecodeString(parts[2])
+    if !hmac.Equal([]byte(expected), actual) {
+        return unauthorized("invalid signature"), nil
+    }
+
+    // decode claims and check expiry ...
+}
+
+func unauthorized(msg string) *pluginsv1.ValidateTokenResponse {
+    return &pluginsv1.ValidateTokenResponse{
+        Error: &pluginsv1.PluginError{Code: pluginsv1.ErrorCodeUnauthorized, Message: msg},
+    }
+}
+```

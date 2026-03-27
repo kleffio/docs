@@ -1,0 +1,216 @@
+export const metadata = {
+  title: "Plugin SDK Reference",
+  description: "Overview of the Kleff plugin SDK — transport, gRPC services, registration, and unimplemented base types.",
+};
+
+# Plugin SDK Reference
+
+<Badge variant="stable">stable</Badge>
+
+The Kleff plugin SDK lives at `github.com/kleffio/plugin-sdk/v1`. It exposes all the Go structs,
+constants, service interfaces, and registration helpers your plugin needs.
+
+```go
+import pluginsv1 "github.com/kleffio/plugin-sdk/v1"
+```
+
+```bash
+go get github.com/kleffio/plugin-sdk/v1
+```
+
+The SDK is versioned. Breaking changes introduce a new major import path (`/v2`) with a migration
+guide. Additive changes (new fields, new optional RPCs) are made in-place within the current major
+version.
+
+**Type references:**
+- [Common types](../sdk-common-types) — health, capabilities, errors, middleware, UI, HTTP routes
+- [IDP types](../sdk-idp-types) — login, tokens, claims, registration, OIDC
+
+## Transport
+
+### JSON-over-gRPC Codec
+
+The SDK registers a custom gRPC codec that replaces protobuf binary encoding with JSON. This
+happens automatically on import — no configuration required.
+
+All message types are plain Go structs with standard `encoding/json` semantics. There are no
+generated `.pb.go` files and no `.proto` source to maintain.
+
+```go
+// A real SDK type — no protobuf, no generated code
+type LoginRequest struct {
+    Username string
+    Password string
+}
+```
+
+On the wire this becomes: `{"Username":"alice","Password":"hunter2"}`
+
+### Cross-Language Interoperability
+
+Because the wire format is JSON, plugins written in other languages don't need the Go SDK. The
+requirements are:
+
+- Use gRPC with a custom JSON codec (not protobuf binary)
+- Register service names following the pattern `kleff.plugins.v1.ServiceName/MethodName`
+- Serialize messages as JSON with **PascalCase** field names matching Go struct field names exactly
+
+<Callout type="info" title="PascalCase field names">
+All JSON field names use PascalCase to match Go struct names. This differs from typical JSON
+camelCase convention. Non-Go plugins must not auto-convert field names to camelCase.
+</Callout>
+
+## gRPC Services
+
+The SDK defines five gRPC services. `PluginHealth` is required by all plugins. The rest are
+optional and gated by capability declarations.
+
+| Service | Capability Required | Purpose |
+|---------|--------------------|---------|
+| `PluginHealth` | (always required) | Liveness polling and capability discovery |
+| `IdentityPlugin` | `identity.provider` | Login, token validation, registration, OIDC |
+| `PluginMiddleware` | `api.middleware` | Per-request authorization |
+| `PluginUI` | `ui.manifest` | Panel nav items and settings pages |
+| `PluginHTTP` | `api.routes` | Owned HTTP routes |
+
+### PluginHealth
+
+Required by all plugins. The platform polls `Health` every 30 seconds and calls `GetCapabilities`
+once on connection.
+
+```
+Health(HealthRequest) → HealthResponse
+GetCapabilities(GetCapabilitiesRequest) → GetCapabilitiesResponse
+```
+
+| RPC | Called When | Notes |
+|-----|-------------|-------|
+| `Health` | Every 30 s | Must respond within 5 s or counts as failure |
+| `GetCapabilities` | Once on connect, after restart | Return all capabilities implemented |
+
+### IdentityPlugin
+
+Handles the full auth lifecycle. Only one plugin per Kleff instance may hold this capability.
+
+```
+Login(LoginRequest) → LoginResponse
+Register(RegisterRequest) → RegisterResponse
+GetUser(GetUserRequest) → GetUserResponse
+ValidateToken(ValidateTokenRequest) → ValidateTokenResponse
+RefreshToken(RefreshTokenRequest) → RefreshTokenResponse
+GetOIDCConfig(struct{}) → OIDCConfig
+```
+
+| RPC | Called When | Notes |
+|-----|-------------|-------|
+| `Login` | User submits login form | Return `UNAUTHORIZED` for bad credentials |
+| `Register` | User submits registration form | Return `CONFLICT` for duplicate username/email |
+| `GetUser` | Platform needs user profile data | Return `NOT_FOUND` if user doesn't exist |
+| `ValidateToken` | Every authenticated request | **Hot path** — must be fast |
+| `RefreshToken` | Client requests token refresh | Return `UNAUTHORIZED` if token expired |
+| `GetOIDCConfig` | Panel startup | Return `NOT_SUPPORTED` for non-OIDC providers |
+
+### PluginMiddleware
+
+Called before every authenticated API request. Multiple middleware plugins run concurrently.
+
+```
+OnRequest(MiddlewareRequest) → MiddlewareResponse
+```
+
+| RPC | Notes |
+|-----|-------|
+| `OnRequest` | Return `Allow: true` to proceed, `Allow: false` to reject with 403 |
+
+### PluginUI
+
+Contributes nav items and settings pages to the admin panel.
+
+```
+GetUIManifest(struct{}) → UIManifest
+```
+
+### PluginHTTP
+
+Owns and handles specific HTTP routes. Routes are registered once on connection.
+
+```
+GetRoutes(GetRoutesRequest) → GetRoutesResponse
+Handle(HandleHTTPRequest) → HandleHTTPResponse
+```
+
+## gRPC Service Registration
+
+Call `Register*Server` functions before `gs.Serve`. Register only the services matching your
+declared capabilities.
+
+```go
+package main
+
+import (
+    "net"
+    "os"
+
+    "google.golang.org/grpc"
+    pluginsv1 "github.com/kleffio/plugin-sdk/v1"
+)
+
+func main() {
+    srv := &Server{}
+
+    gs := grpc.NewServer()
+    pluginsv1.RegisterPluginHealthServer(gs, srv)       // always
+    pluginsv1.RegisterIdentityPluginServer(gs, srv)     // if identity.provider
+    pluginsv1.RegisterPluginMiddlewareServer(gs, srv)   // if api.middleware
+    pluginsv1.RegisterPluginUIServer(gs, srv)           // if ui.manifest
+    pluginsv1.RegisterPluginHTTPServer(gs, srv)         // if api.routes
+
+    port := os.Getenv("PLUGIN_PORT")
+    if port == "" {
+        port = "50051"
+    }
+    lis, _ := net.Listen("tcp", ":"+port)
+    gs.Serve(lis)
+}
+```
+
+## Unimplemented Base Types
+
+Every service has an `Unimplemented*Server` base type. Embedding it provides default
+implementations for every method — each returns `ErrorCodeNotSupported` with a nil Go error.
+
+```go
+type Server struct {
+    pluginsv1.UnimplementedPluginHealthServer
+    pluginsv1.UnimplementedIdentityPluginServer
+    pluginsv1.UnimplementedPluginMiddlewareServer
+    pluginsv1.UnimplementedPluginUIServer
+    pluginsv1.UnimplementedPluginHTTPServer
+}
+```
+
+| Base Type | Service |
+|-----------|---------|
+| `UnimplementedPluginHealthServer` | `PluginHealth` |
+| `UnimplementedIdentityPluginServer` | `IdentityPlugin` |
+| `UnimplementedPluginMiddlewareServer` | `PluginMiddleware` |
+| `UnimplementedPluginUIServer` | `PluginUI` |
+| `UnimplementedPluginHTTPServer` | `PluginHTTP` |
+
+Override only the methods your plugin implements. Methods you don't override automatically return
+`NOT_SUPPORTED`, which the platform treats as a structured application response — not a transport
+failure.
+
+```go
+// Only Health, GetCapabilities, and Login are implemented.
+// All other IdentityPlugin methods fall through to the base and return NOT_SUPPORTED.
+func (s *Server) Login(ctx context.Context, req *pluginsv1.LoginRequest) (*pluginsv1.LoginResponse, error) {
+    // your implementation
+}
+```
+
+<Callout type="warning" title="Always embed all five base types">
+Embed all five even if you only implement one service. When new RPC methods are added to the SDK
+in future releases, your plugin will automatically return `NOT_SUPPORTED` instead of failing to
+compile or causing a runtime panic.
+</Callout>

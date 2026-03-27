@@ -1,0 +1,292 @@
+export const metadata = {
+  title: "Publishing a Plugin",
+  description: "How to publish a Kleff plugin to the plugin registry — versioning, image requirements, and the review process.",
+};
+
+# Publishing a Plugin
+
+<Badge variant="stable">Developer Guide</Badge>
+
+Once your plugin works locally, this guide explains how to publish it to the Kleff plugin registry
+so other Kleff operators can discover and install it from the marketplace UI.
+
+## Prerequisites
+
+- A working plugin that passes local testing (see [Testing](../testing))
+- A public Docker image registry (GitHub Container Registry, Docker Hub, etc.)
+- A public GitHub repository with your plugin's source code
+
+## Step 1 — Finalize the Manifest
+
+Review every field in `kleff-plugin.json` before publishing:
+
+```json
+{
+  "id": "idp-myprovider",
+  "name": "MyProvider",
+  "type": "idp",
+  "description": "Connect Kleff to MyProvider for single sign-on.",
+  "longDescription": "## Setup\n\n1. Create a client in the MyProvider dashboard...",
+  "tags": ["sso", "oauth2"],
+  "author": "Your Name",
+  "repo": "https://github.com/you/idp-myprovider",
+  "docs": "https://docs.myprovider.com/kleff",
+  "image": "ghcr.io/you/idp-myprovider",
+  "version": "1.0.0",
+  "minKleffVersion": "0.5.0",
+  "license": "MIT",
+  "verified": false,
+  "logo": "https://cdn.myprovider.com/logo.png",
+  "capabilities": ["identity.provider"],
+  "config": [
+    {
+      "key": "MYPROVIDER_DOMAIN",
+      "label": "Domain",
+      "type": "string",
+      "required": true
+    },
+    {
+      "key": "MYPROVIDER_CLIENT_SECRET",
+      "label": "Client Secret",
+      "type": "secret",
+      "required": true
+    }
+  ]
+}
+```
+
+**Checklist before publishing:**
+
+- [ ] `id` is globally unique and follows the `{type}-{provider}` convention
+- [ ] `version` is a proper semver tag (e.g. `1.0.0`)
+- [ ] `image` points to a publicly pullable image **without** the tag
+- [ ] All sensitive config fields use `"type": "secret"`
+- [ ] `repo` points to public source code
+- [ ] `verified` is `false` (the Kleff team sets this after auditing)
+- [ ] `longDescription` includes setup steps and prerequisites
+
+## Step 2 — Build and Push the Docker Image
+
+### Tagging convention
+
+Tag your image with the exact semver version from your manifest:
+
+```bash
+docker build -t ghcr.io/you/idp-myprovider:1.0.0 .
+docker push ghcr.io/you/idp-myprovider:1.0.0
+```
+
+Also push a `latest` tag if you want users to track the newest version:
+
+```bash
+docker tag ghcr.io/you/idp-myprovider:1.0.0 ghcr.io/you/idp-myprovider:latest
+docker push ghcr.io/you/idp-myprovider:latest
+```
+
+### Image requirements
+
+| Requirement | Detail |
+|-------------|--------|
+| Publicly pullable | No registry authentication required |
+| Exposes gRPC port | Must listen on `PLUGIN_PORT` (default `50051`) |
+| Health responds within 5s | `PluginHealth/Health` must reply quickly after start |
+| Minimal base image | Use `alpine`, `distroless`, or similar — no `ubuntu:latest` |
+| Static binary (Go) | Build with `CGO_ENABLED=0` to avoid libc dependencies on Alpine |
+| No known critical CVEs | Scan with Trivy or Grype before publishing |
+
+### GitHub Actions release workflow
+
+```yaml
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}
+            ghcr.io/${{ github.repository }}:latest
+
+      - name: Scan for CVEs
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}
+          severity: CRITICAL
+          exit-code: "1"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+```
+
+## Step 3 — Submit to the Registry
+
+The Kleff plugin registry is a GitHub repository:
+`github.com/kleffio/plugin-registry`
+
+### Fork and add your plugin
+
+1. Fork `github.com/kleffio/plugin-registry`
+
+2. Add your plugin manifest to `plugins.json`:
+
+```json
+{
+  "plugins": [
+    {
+      "id": "idp-myprovider",
+      "name": "MyProvider",
+      "type": "idp",
+      "description": "Connect Kleff to MyProvider for SSO.",
+      ...
+    }
+  ]
+}
+```
+
+3. Open a pull request to `kleffio/plugin-registry` with the title:
+   `Add plugin: idp-myprovider`
+
+### PR description template
+
+```markdown
+## Plugin Submission
+
+**ID:** idp-myprovider
+**Type:** idp
+**Image:** ghcr.io/you/idp-myprovider:1.0.0
+
+### Checklist
+
+- [x] Image is publicly pullable
+- [x] Source code is publicly available at {repo}
+- [x] Health RPC responds within 5 seconds
+- [x] All sensitive fields use `type: "secret"`
+- [x] No critical CVEs (Trivy scan attached)
+- [x] Tested against Kleff v0.5.0+
+```
+
+## Review Process
+
+### Standard review (unverified)
+
+For `"verified": false` plugins, the review is lightweight:
+
+1. Automated checks: manifest schema validation, image pullability, Health RPC test
+2. Human check: PR description, no obvious policy violations
+3. Merge → plugin appears in the marketplace within ~5 minutes (next catalog refresh)
+
+Standard review typically takes 1–3 business days.
+
+### Verified review
+
+To request the `verified` badge, open a PR with the manifest and add a comment:
+`@kleffio/reviewers requesting verified status`
+
+The audit includes:
+
+1. **Source code review** — no exfiltration, no hardcoded secrets, no embedded platform code
+2. **Image analysis** — Trivy scan, base image review, binary analysis
+3. **Behavior testing** — install on a test Kleff instance, test all declared capabilities
+4. **Dependency review** — check third-party library licenses and known issues
+
+Verified review typically takes 5–10 business days.
+
+<Callout type="info" title="Official Kleff plugins">
+Plugins in the `github.com/kleffio/plugins` repository are maintained by the Kleff team and are
+always verified. These are the reference implementations for each capability type.
+</Callout>
+
+## Versioning and Updates
+
+### Semver convention
+
+Follow [Semantic Versioning](https://semver.org):
+
+| Change Type | Version Bump |
+|-------------|-------------|
+| Bug fix, minor improvement | PATCH (1.0.0 → 1.0.1) |
+| New optional capability or config field | MINOR (1.0.0 → 1.1.0) |
+| Breaking change (renamed config key, removed RPC) | MAJOR (1.0.0 → 2.0.0) |
+
+### Publishing a new version
+
+1. Update `version` in `kleff-plugin.json`
+2. Build and push the new image tag
+3. Update the registry entry (open a PR to `plugin-registry` with the new version)
+4. Existing installations won't auto-update — admins must manually update via the panel
+
+### Breaking changes
+
+If you rename a required config key between versions (a breaking change), document the migration
+clearly in `longDescription` and the GitHub release notes. Operators will need to re-configure the
+plugin after updating.
+
+<Callout type="warning" title="Never reuse a version tag">
+Never push a different image to an existing version tag (e.g. re-tagging `1.0.0`). Kleff
+installations that installed that version will get inconsistent behavior. Always increment the
+version number for any change to the image.
+</Callout>
+
+## Maintaining Your Plugin
+
+### Responding to issues
+
+Users can report issues against your plugin at your `repo` URL. The registry links directly to
+this. Aim to respond to critical security issues within 24 hours.
+
+### Updating minKleffVersion
+
+If a new Kleff version introduces platform features your plugin requires, update
+`minKleffVersion` accordingly. The platform will reject installation of incompatible plugins.
+
+### Deprecating a plugin
+
+To deprecate a plugin:
+
+1. Add a deprecation notice to `description` and `longDescription`
+2. Open a PR to `plugin-registry` marking the plugin as deprecated in `plugins.json`
+3. Consider publishing a migration guide pointing users to a replacement
+
+### Removing a plugin from the registry
+
+Open a PR to remove your plugin from `plugins.json`. Existing installations will continue to work
+but the plugin will no longer appear in new marketplace searches.
+
+## Registry API
+
+Operators can override the registry URL with the `PLUGIN_REGISTRY_URL` environment variable on
+the platform. This allows enterprise deployments to use a private plugin catalog:
+
+```bash
+PLUGIN_REGISTRY_URL=https://registry.internal.example.com/plugins.json
+```
+
+The registry URL must point to a JSON file with the same schema as `plugins.json`.

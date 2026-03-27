@@ -1,0 +1,203 @@
+export const metadata = {
+  title: "Identity Provider Plugins",
+  description: "Build an IDP plugin for Kleff — overview, auth modes, login, and setting the active provider.",
+};
+
+# Identity Provider Plugins
+
+<Badge variant="stable">Capability: identity.provider</Badge>
+
+An identity provider plugin replaces Kleff's authentication layer. The platform ships a native IDP
+(bcrypt + Postgres + RS256 JWTs) used by default, but you can replace it with any external auth
+system by installing an IDP plugin and setting it as active.
+
+Only one IDP plugin can be active at a time. When active, all login, token validation,
+registration, and refresh operations are delegated to it over gRPC.
+
+**Connect Kleff to:**
+- Keycloak, Auth0, Okta — enterprise SSO with MFA and social login
+- LDAP / Active Directory — on-premise directory services
+- Any custom service that can issue JWTs
+
+**Related pages:**
+- [Token Validation](../idp-token-validation) — ValidateToken deep dive, JWKS caching, claims mapping
+- [Optional RPCs](../idp-optional-rpcs) — Register, RefreshToken, GetOIDCConfig, GetUser + examples
+
+## Auth Modes
+
+The `OIDCConfig.AuthMode` field controls how the panel authenticates users.
+
+### Headless
+
+User submits credentials in the Kleff panel login form. The platform forwards them to your plugin
+via gRPC.
+
+```
+User ──── username + password ────▶ Panel
+Panel ─── POST /api/v1/auth/login ▶ Platform
+Platform ── Login() gRPC ──────────▶ Plugin
+Plugin ─── authenticate ───────────▶ Provider
+Plugin ─── LoginResponse ──────────▶ Platform
+Platform ── { accessToken } ───────▶ Panel
+```
+
+Best for: LDAP, ROPC grant, custom auth APIs, any provider that accepts direct credentials.
+
+### Redirect
+
+The panel reads your OIDC config and redirects the user to the external IdP's login page.
+
+```
+Panel ─── GET /api/v1/auth/config ▶ Platform
+Platform ─ GetOIDCConfig() ────────▶ Plugin
+Panel ─── redirect to Authority ──▶ External IdP
+User logs in at IdP
+IdP ────── redirect with code ─────▶ Panel
+Panel ─── ValidateToken(id_token) ▶ Plugin
+Panel ─── stores tokens
+```
+
+Best for: providers with their own login UI, SSO, MFA, social login.
+
+## Required RPCs
+
+### Health
+
+Called every 30 seconds. Must respond within 5 seconds. Three failures → plugin moves to `ERROR`.
+
+```go
+func (s *Server) Health(_ context.Context, _ *pluginsv1.HealthRequest) (*pluginsv1.HealthResponse, error) {
+    if err := s.provider.Ping(context.Background()); err != nil {
+        return &pluginsv1.HealthResponse{
+            Status:  pluginsv1.HealthStatusDegraded,
+            Message: "provider unreachable: " + err.Error(),
+        }, nil
+    }
+    return &pluginsv1.HealthResponse{Status: pluginsv1.HealthStatusHealthy}, nil
+}
+```
+
+Return `DEGRADED` when your plugin is alive but the upstream provider is temporarily unavailable.
+This prevents spurious restarts during transient outages.
+
+### Login
+
+Called when the user submits the login form (headless mode). Authenticate the credentials against
+your provider and return a `TokenSet` on success.
+
+**Error mapping:**
+
+| Situation | Error Code |
+|-----------|------------|
+| Wrong password | `ErrorCodeUnauthorized` |
+| Account locked or disabled | `ErrorCodeUnauthorized` |
+| User not found | `ErrorCodeUnauthorized` (don't reveal user existence) |
+| Provider unreachable | `ErrorCodeInternal` |
+
+```go
+func (s *Server) Login(ctx context.Context, req *pluginsv1.LoginRequest) (*pluginsv1.LoginResponse, error) {
+    tok, err := s.provider.Login(ctx, req.Username, req.Password)
+    if err != nil {
+        if domain.IsUnauthorized(err) {
+            return &pluginsv1.LoginResponse{
+                Error: &pluginsv1.PluginError{
+                    Code:    pluginsv1.ErrorCodeUnauthorized,
+                    Message: "invalid credentials",
+                },
+            }, nil
+        }
+        return &pluginsv1.LoginResponse{
+            Error: &pluginsv1.PluginError{
+                Code:    pluginsv1.ErrorCodeInternal,
+                Message: "authentication failed",
+            },
+        }, nil
+    }
+    return &pluginsv1.LoginResponse{
+        Token: &pluginsv1.TokenSet{
+            AccessToken:  tok.AccessToken,
+            RefreshToken: tok.RefreshToken,
+            IDToken:      tok.IDToken,
+            ExpiresIn:    tok.ExpiresIn,
+            TokenType:    "Bearer",
+            Scope:        tok.Scope,
+        },
+    }, nil
+}
+```
+
+<Callout type="warning" title="Never reveal user existence">
+Return the same generic `"invalid credentials"` message for both wrong-password and user-not-found
+cases. Distinguishing between them leaks information about which usernames exist.
+</Callout>
+
+### ValidateToken
+
+Called on **every authenticated request**. See [Token Validation](../idp-token-validation) for the
+full guide including JWKS caching and claims mapping.
+
+```go
+func (s *Server) ValidateToken(ctx context.Context, req *pluginsv1.ValidateTokenRequest) (*pluginsv1.ValidateTokenResponse, error) {
+    claims, err := s.provider.ValidateToken(ctx, req.Token)
+    if err != nil {
+        return &pluginsv1.ValidateTokenResponse{
+            Error: &pluginsv1.PluginError{Code: pluginsv1.ErrorCodeUnauthorized, Message: err.Error()},
+        }, nil
+    }
+    return &pluginsv1.ValidateTokenResponse{
+        Claims: &pluginsv1.TokenClaims{
+            Subject: claims.Subject,
+            Email:   claims.Email,
+            Roles:   claims.Roles,
+        },
+    }, nil
+}
+```
+
+## Setting as Active IDP
+
+Installing the plugin does not activate it. An admin must call:
+
+```bash
+POST /api/v1/admin/plugins/{id}/set-active
+```
+
+Or through the panel: **Admin → Plugins → {plugin} → Set as Active IDP**.
+
+Only plugins with `identity.provider` can be activated this way. Once active, all auth routes
+delegate to your plugin. The native IDP is bypassed until another IDP is activated.
+
+<Callout type="info" title="Rollback">
+If your plugin fails after activation, reactivate the native IDP via the panel under
+Settings → Authentication, or call `POST /api/v1/admin/plugins/native/set-active`.
+</Callout>
+
+## Manifest
+
+```json
+{
+  "capabilities": ["identity.provider"],
+  "config": [
+    { "key": "PROVIDER_URL", "label": "Provider URL", "type": "url", "required": true },
+    { "key": "CLIENT_SECRET", "label": "Client Secret", "type": "secret", "required": true },
+    {
+      "key": "AUTH_MODE",
+      "label": "Login Mode",
+      "type": "select",
+      "options": ["headless", "redirect"],
+      "default": "headless",
+      "required": false
+    }
+  ]
+}
+```
+
+## Troubleshooting
+
+| Problem | Likely Cause | Fix |
+|---------|-------------|-----|
+| Login always returns `UNAUTHORIZED` | Client credentials wrong, or provider rejects them | Check provider logs; verify config values |
+| Plugin stuck at `DEGRADED` | Can't reach identity provider | Check network from plugin container to provider |
+| `"active IDP not set"` in panel | Plugin installed but not activated | Call `set-active` endpoint |
+| Roles not appearing | Claims mapping is wrong | Log raw JWT claims and map the correct field |
+| `"unknown key id"` on validation | Provider rotated signing keys | See [Token Validation → JWKS caching](../idp-token-validation) |

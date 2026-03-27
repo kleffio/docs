@@ -1,0 +1,488 @@
+export const metadata = {
+  title: "Plugin HTTP Routes",
+  description: "Own and handle custom HTTP routes under the Kleff platform domain using the api.routes capability.",
+};
+
+# Plugin HTTP Routes
+
+<Badge variant="stable">Capability: api.routes</Badge>
+
+The `api.routes` capability lets a plugin take ownership of specific HTTP paths under the Kleff
+platform domain. Matching requests are intercepted by the platform and forwarded to the plugin via
+gRPC. The plugin returns a raw HTTP response that the platform writes verbatim to the client.
+
+Use cases include OAuth2 callbacks, inbound webhooks, custom REST APIs, static file serving, and
+reverse-proxying to internal services.
+
+## How It Works
+
+```
+Incoming HTTP request
+        │
+        ▼
+PluginRouteInterceptor middleware
+        │
+        ├─ No route match → pass to next platform handler
+        │
+        └─ Route matched
+                │
+                ├─ Route.Public = false → validate Bearer token
+                │         token invalid → 401
+                │         token valid   → inject UserID + Roles
+                │
+                ├─ Build HTTPRequest{Method, Path, RawQuery, Headers, Body, UserID, Roles}
+                │
+                └─ PluginHTTP/Handle() gRPC call
+                          │
+                          ▼
+                    Plugin processes request
+                          │
+                          ▼
+                    HTTPResponse{StatusCode, Headers, Body}
+                          │
+                          ▼
+                Platform writes response to client
+```
+
+## Declaring Routes
+
+```go
+type Route struct {
+    Method string  // HTTP method or "*" for any
+    Path   string  // exact path or prefix ending in "/*"
+    Public bool    // skip token validation if true
+}
+```
+
+### Method
+
+Specific HTTP method (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`) or `*` to match
+any method.
+
+### Path
+
+Two formats:
+
+- **Exact**: `/api/v1/my-plugin/status` — matches only that path
+- **Prefix**: `/api/v1/my-plugin/*` — matches the prefix and anything under it
+
+<Callout type="warning" title="Avoid overly broad wildcards">
+Do not register `/api/*` or similar catch-all patterns — you would intercept all platform traffic.
+Keep route patterns scoped to your plugin's path prefix.
+</Callout>
+
+### Public
+
+If `true`, the platform skips token validation. `HTTPRequest.UserID` and `HTTPRequest.Roles` will
+be empty strings/slices. Use `Public: true` for:
+
+- OAuth2 callback endpoints
+- Inbound webhooks from external services
+- Public health/status endpoints
+
+### Route matching table
+
+| Declared Pattern | Method | Matches |
+|-----------------|--------|---------|
+| `/api/v1/plugin/status` | `GET` | Only `GET /api/v1/plugin/status` |
+| `/api/v1/plugin/status` | `*` | Any method on that exact path |
+| `/api/v1/plugin/*` | `GET` | Any `GET` under `/api/v1/plugin/` |
+| `/api/v1/plugin/*` | `*` | Any method under `/api/v1/plugin/` |
+
+Routes are matched in declaration order. Declare more specific patterns before wildcards.
+
+## GetRoutes Implementation
+
+```go
+func (s *Server) GetRoutes(_ context.Context, _ *pluginsv1.GetRoutesRequest) (*pluginsv1.GetRoutesResponse, error) {
+    return &pluginsv1.GetRoutesResponse{
+        Routes: []*pluginsv1.Route{
+            // Public: OAuth callback and webhooks don't need auth
+            {Method: "GET",  Path: "/api/v1/my-plugin/auth/callback", Public: true},
+            {Method: "POST", Path: "/api/v1/my-plugin/webhooks/*",    Public: true},
+
+            // Authenticated: require valid Bearer token
+            {Method: "GET",  Path: "/api/v1/my-plugin/status",        Public: false},
+            {Method: "GET",  Path: "/api/v1/my-plugin/items",         Public: false},
+            {Method: "POST", Path: "/api/v1/my-plugin/items",         Public: false},
+            {Method: "*",    Path: "/api/v1/my-plugin/items/*",       Public: false},
+        },
+    }, nil
+}
+```
+
+## Handle Implementation
+
+The platform calls `Handle` for every matched request. Dispatch to sub-handlers by method and path:
+
+```go
+func (s *Server) Handle(ctx context.Context, req *pluginsv1.HandleHTTPRequest) (*pluginsv1.HandleHTTPResponse, error) {
+    r := req.Request
+    switch {
+    case r.Method == "GET" && r.Path == "/api/v1/my-plugin/status":
+        return s.handleStatus(ctx, r)
+    case r.Method == "GET" && r.Path == "/api/v1/my-plugin/items":
+        return s.listItems(ctx, r)
+    case r.Method == "POST" && r.Path == "/api/v1/my-plugin/items":
+        return s.createItem(ctx, r)
+    case strings.HasPrefix(r.Path, "/api/v1/my-plugin/items/"):
+        id := strings.TrimPrefix(r.Path, "/api/v1/my-plugin/items/")
+        switch r.Method {
+        case "GET":    return s.getItem(ctx, r, id)
+        case "PUT":    return s.updateItem(ctx, r, id)
+        case "DELETE": return s.deleteItem(ctx, r, id)
+        }
+    }
+    return jsonError(404, "not found"), nil
+}
+```
+
+## Working with HTTPRequest
+
+```go
+type HTTPRequest struct {
+    Method   string
+    Path     string
+    RawQuery string
+    Headers  map[string]string
+    Body     []byte
+    UserID   string    // empty for Public routes
+    Roles    []string  // empty for Public routes
+}
+```
+
+### Reading query parameters
+
+```go
+import "net/url"
+
+values, _ := url.ParseQuery(r.RawQuery)
+page  := values.Get("page")
+limit := values.Get("limit")
+```
+
+### Parsing a JSON body
+
+```go
+var payload struct {
+    Name  string `json:"name"`
+    Email string `json:"email"`
+}
+if err := json.Unmarshal(r.Body, &payload); err != nil {
+    return jsonError(400, "invalid JSON body"), nil
+}
+if payload.Name == "" {
+    return jsonError(422, "name is required"), nil
+}
+```
+
+### Checking the authenticated user
+
+```go
+// For non-Public routes, UserID is always set
+if r.UserID == "" {
+    return jsonError(401, "authentication required"), nil
+}
+
+// Role check
+isAdmin := slices.Contains(r.Roles, "admin")
+if !isAdmin {
+    return jsonError(403, "admin role required"), nil
+}
+```
+
+### Reading a specific header
+
+```go
+contentType := r.Headers["content-type"]
+userAgent   := r.Headers["user-agent"]
+// Header keys are lowercased by the platform
+```
+
+## Building HTTPResponses
+
+### JSON response helper
+
+```go
+func jsonResp(status int, v any) *pluginsv1.HandleHTTPResponse {
+    body, _ := json.Marshal(v)
+    return &pluginsv1.HandleHTTPResponse{
+        Response: &pluginsv1.HTTPResponse{
+            StatusCode: status,
+            Headers:    map[string]string{"Content-Type": "application/json"},
+            Body:       body,
+        },
+    }
+}
+
+func jsonError(status int, message string) *pluginsv1.HandleHTTPResponse {
+    return jsonResp(status, map[string]string{"error": message})
+}
+```
+
+### Redirect
+
+```go
+func redirect(location string) *pluginsv1.HandleHTTPResponse {
+    return &pluginsv1.HandleHTTPResponse{
+        Response: &pluginsv1.HTTPResponse{
+            StatusCode: 302,
+            Headers:    map[string]string{"Location": location},
+        },
+    }
+}
+```
+
+### No content (204)
+
+```go
+return &pluginsv1.HandleHTTPResponse{
+    Response: &pluginsv1.HTTPResponse{StatusCode: 204},
+}, nil
+```
+
+### Plain text
+
+```go
+return &pluginsv1.HandleHTTPResponse{
+    Response: &pluginsv1.HTTPResponse{
+        StatusCode: 200,
+        Headers:    map[string]string{"Content-Type": "text/plain; charset=utf-8"},
+        Body:       []byte("hello from plugin"),
+    },
+}, nil
+```
+
+## OAuth2 Callback Example
+
+A public route that receives the authorization code redirect and exchanges it for tokens:
+
+```go
+func (s *Server) handleOAuthCallback(_ context.Context, r *pluginsv1.HTTPRequest) (*pluginsv1.HandleHTTPResponse, error) {
+    values, _ := url.ParseQuery(r.RawQuery)
+
+    if errParam := values.Get("error"); errParam != "" {
+        return redirect("/login?error=" + url.QueryEscape(errParam)), nil
+    }
+
+    code := values.Get("code")
+    if code == "" {
+        return jsonError(400, "missing authorization code"), nil
+    }
+
+    tokens, err := s.provider.ExchangeCode(context.Background(), code)
+    if err != nil {
+        return redirect("/login?error=exchange_failed"), nil
+    }
+
+    // Validate the id_token and extract claims
+    claims, err := s.provider.ValidateToken(context.Background(), tokens.IDToken)
+    if err != nil {
+        return redirect("/login?error=invalid_token"), nil
+    }
+
+    _ = claims // use claims to build a session, set cookies, etc.
+
+    return redirect("/dashboard"), nil
+}
+```
+
+## Webhook Handler Example
+
+GitHub webhook with HMAC-SHA256 signature verification:
+
+```go
+import (
+    "crypto/hmac"
+    "crypto/sha256"
+    "encoding/hex"
+)
+
+func (s *Server) handleGitHubWebhook(_ context.Context, r *pluginsv1.HTTPRequest) (*pluginsv1.HandleHTTPResponse, error) {
+    sig := r.Headers["x-hub-signature-256"]
+    if !verifyHMAC(r.Body, s.webhookSecret, sig) {
+        return jsonError(401, "invalid signature"), nil
+    }
+
+    event := r.Headers["x-github-event"]
+    switch event {
+    case "push":
+        go s.processPushEvent(r.Body)
+    case "pull_request":
+        go s.processPREvent(r.Body)
+    default:
+        // Ignore unsupported events
+    }
+
+    return jsonResp(200, map[string]bool{"received": true}), nil
+}
+
+func verifyHMAC(body []byte, secret, sig string) bool {
+    mac := hmac.New(sha256.New, []byte(secret))
+    mac.Write(body)
+    expected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+    return hmac.Equal([]byte(expected), []byte(sig))
+}
+```
+
+## Serving Static Files / SPA
+
+Embed a frontend SPA in the plugin binary using Go's `embed` package:
+
+```go
+import "embed"
+
+//go:embed dist/*
+var staticFS embed.FS
+
+func (s *Server) serveStatic(_ context.Context, r *pluginsv1.HTTPRequest) (*pluginsv1.HandleHTTPResponse, error) {
+    filePath := strings.TrimPrefix(r.Path, "/api/v1/my-plugin/ui")
+    if filePath == "" || filePath == "/" {
+        filePath = "/index.html"
+    }
+
+    content, err := staticFS.ReadFile("dist" + filePath)
+    if err != nil {
+        // SPA: fall back to index.html for client-side routing
+        content, err = staticFS.ReadFile("dist/index.html")
+        if err != nil {
+            return jsonError(404, "not found"), nil
+        }
+        filePath = "/index.html"
+    }
+
+    ct := mime.TypeByExtension(filepath.Ext(filePath))
+    if ct == "" {
+        ct = "application/octet-stream"
+    }
+
+    return &pluginsv1.HandleHTTPResponse{
+        Response: &pluginsv1.HTTPResponse{
+            StatusCode: 200,
+            Headers:    map[string]string{"Content-Type": ct},
+            Body:       content,
+        },
+    }, nil
+}
+```
+
+## CORS Headers
+
+If the plugin API is called from a browser on a different origin, add CORS headers to responses:
+
+```go
+func corsHeaders() map[string]string {
+    return map[string]string{
+        "Access-Control-Allow-Origin":  "*",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    }
+}
+
+// Handle OPTIONS preflight
+case r.Method == "OPTIONS":
+    return &pluginsv1.HandleHTTPResponse{
+        Response: &pluginsv1.HTTPResponse{
+            StatusCode: 204,
+            Headers:    corsHeaders(),
+        },
+    }, nil
+```
+
+## Complete main.go
+
+```go
+package main
+
+import (
+    "net"
+    "os"
+
+    pluginsv1 "github.com/kleffio/plugin-sdk/v1"
+    "google.golang.org/grpc"
+)
+
+func main() {
+    srv := &Server{
+        webhookSecret: mustEnv("WEBHOOK_SECRET"),
+    }
+
+    gs := grpc.NewServer()
+    pluginsv1.RegisterPluginHealthServer(gs, srv)
+    pluginsv1.RegisterPluginHTTPServer(gs, srv)
+
+    lis, err := net.Listen("tcp", ":"+env("PLUGIN_PORT", "50051"))
+    if err != nil {
+        panic(err)
+    }
+    gs.Serve(lis)
+}
+
+func env(k, d string) string {
+    if v := os.Getenv(k); v != "" {
+        return v
+    }
+    return d
+}
+
+func mustEnv(k string) string {
+    if v := os.Getenv(k); v != "" {
+        return v
+    }
+    panic("required env var not set: " + k)
+}
+```
+
+## Manifest Example
+
+```json
+{
+  "id": "plugin-webhooks",
+  "name": "Webhook Handler",
+  "type": "extension",
+  "description": "Handles inbound webhooks and serves a custom admin UI.",
+  "capabilities": ["api.routes", "ui.manifest"],
+  "config": [
+    {
+      "key": "WEBHOOK_SECRET",
+      "label": "Webhook Secret",
+      "description": "HMAC secret used to verify inbound webhook signatures.",
+      "type": "secret",
+      "required": true
+    },
+    {
+      "key": "OAUTH_CLIENT_ID",
+      "label": "OAuth Client ID",
+      "type": "string",
+      "required": true
+    },
+    {
+      "key": "OAUTH_CLIENT_SECRET",
+      "label": "OAuth Client Secret",
+      "type": "secret",
+      "required": true
+    }
+  ]
+}
+```
+
+## Limitations
+
+| Limitation | Detail |
+|------------|--------|
+| Max request body | Determined by the platform's gRPC message size limit (default 4 MB) |
+| Streaming | Not supported — response body is fully buffered |
+| WebSockets | Not supported — HTTP only |
+| Reserved paths | Plugins cannot claim `/api/v1/admin/*` — reserved for the platform |
+| Route registration | Routes registered at plugin startup; changing routes requires plugin restart |
+
+## Troubleshooting
+
+| Problem | Likely Cause | Fix |
+|---------|-------------|-----|
+| Route not matched | Wrong path format | Use `grpcurl` to call `GetRoutes` and verify patterns |
+| 401 on a public route | Route declared `Public: false` | Set `Public: true` in `GetRoutes` |
+| 413 / body truncated | Request body exceeds gRPC limit | Reduce payload or increase platform message size limit |
+| Handle never called | Plugin not running or gRPC dial failed | Check plugin status and health in the admin panel |
+| CORS errors in browser | Missing CORS headers | Return `Access-Control-Allow-Origin` in response headers |
+| Wildcard matches too much | Pattern too broad | Scope pattern to your plugin's prefix |

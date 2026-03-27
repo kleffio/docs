@@ -1,0 +1,282 @@
+export const metadata = {
+  title: "Plugin Lifecycle",
+  description: "How plugins move through states — installation, startup, health checks, restarts, disable, and removal.",
+};
+
+# Plugin Lifecycle
+
+<Badge variant="stable">Platform Feature</Badge>
+
+This page explains the full lifecycle of a Kleff plugin from installation through removal,
+including the state machine, health monitoring, restart behavior, and how the platform manages
+plugin containers.
+
+## State Machine
+
+```
+(Marketplace)
+      │ Install
+      ▼
+  INSTALLING ──────────────────────────────► ERROR
+      │ Container started, gRPC dial OK
+      ▼
+   RUNNING ◄────────── Enable ──────────── DISABLED
+      │                                       ▲
+      ├──── Disable ──────────────────────────┘
+      │
+      ├──── Health fails × 3 ─────────────► ERROR
+      │
+      └──── Remove ───────────────────────► REMOVING ──► (deleted)
+```
+
+| State | Meaning | Container Running |
+|-------|---------|-------------------|
+| `installing` | Platform is pulling the image and starting the container | Starting |
+| `running` | Container up, gRPC healthy, handling requests | Yes |
+| `disabled` | Manually stopped; config preserved in DB | No |
+| `removing` | Uninstall in progress; container being torn down | Stopping |
+| `error` | Health check failed after max retries | Maybe |
+| `unknown` | State not yet determined (e.g. platform just restarted) | Unknown |
+
+## Installation
+
+An admin installs a plugin via the panel marketplace or the API:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/admin/plugins \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "idp-keycloak",
+    "version": "1.0.0",
+    "config": {
+      "KEYCLOAK_URL": "http://keycloak:8080",
+      "KEYCLOAK_REALM": "master",
+      "KEYCLOAK_CLIENT_SECRET": "s3cr3t"
+    }
+  }'
+```
+
+### What happens during Install
+
+1. **Validate** — platform checks that `id` is unique and that all `required` config fields are
+   provided
+2. **Separate secrets** — fields with `type: "secret"` are split from the plain config
+3. **Encrypt secrets** — secret values are encrypted with AES-256-GCM before storage
+4. **Persist** — `Plugin` record inserted into the `plugins` table with status `installing`
+5. **Deploy** — `RuntimeAdapter.Deploy()` pulls the Docker image and starts the container:
+   - Container name: `kleff-{id}` (e.g. `kleff-idp-keycloak`)
+   - Network: `kleff` Docker network (or k8s cluster network)
+   - Port: `50051` (or `PLUGIN_PORT`)
+   - Env vars: all config + decrypted secrets + `PLUGIN_ID` + `PLUGIN_PORT`
+6. **Dial** — platform opens a gRPC connection to `{id}:50051`
+7. **Capabilities** — calls `GetCapabilities` to discover what the plugin implements
+8. **Routes** — if `api.routes` capability: calls `GetRoutes` to register route patterns
+9. **Status → RUNNING** — first successful `Health` call sets the plugin to `running`
+
+### Container naming
+
+| Runtime | Container / Resource Name |
+|---------|---------------------------|
+| Docker | `kleff-{id}` |
+| Kubernetes | Deployment `kleff-{id}` in namespace `kleff` |
+| Manual | Platform generates config snippets; no automation |
+
+## Health Monitoring
+
+The platform runs a background health loop for every running plugin.
+
+### Poll interval
+
+The `PluginHealth/Health` RPC is called every **30 seconds**. The call must return within
+**5 seconds**. A `HealthStatusHealthy` response resets the failure counter.
+
+### Failure handling
+
+| Consecutive Failures | Platform Action |
+|----------------------|-----------------|
+| 1 | Log warning, continue |
+| 2 | Log error, attempt restart |
+| 3 | Mark plugin as `ERROR`, stop restart attempts, surface alert in panel |
+
+Once a plugin reaches `ERROR`, a human must intervene — either fix the root cause and
+**enable** the plugin again, or **remove** it.
+
+### Health response semantics
+
+| Status | Platform treats as |
+|--------|-------------------|
+| `HEALTHY` | All good, reset failure counter |
+| `DEGRADED` | Plugin alive but impaired; show warning badge in panel, do NOT restart |
+| `UNHEALTHY` | Plugin running but cannot serve; treat as failure, increment counter |
+| No response / timeout | Treat as failure, increment counter |
+
+<Callout type="info" title="Use DEGRADED for recoverable conditions">
+Return `DEGRADED` when your plugin is running but a dependency is temporarily unavailable (e.g.
+the identity provider's API is slow). This prevents spurious restarts during transient outages
+while still surfacing the issue in the panel.
+</Callout>
+
+## Startup on Platform Boot
+
+When the platform starts, it loads all plugins that were `running` or `disabled` before shutdown:
+
+1. Query `plugins` table for all records with `enabled = true`
+2. For each: call `RuntimeAdapter.EnsureRunning()` — starts the container if not already running
+3. Dial the gRPC endpoint
+4. Discover capabilities
+5. Register routes (for `api.routes` plugins)
+6. Start health loop
+
+Plugins that fail to start during platform boot are moved to `ERROR` state immediately.
+
+## Disable and Enable
+
+Disabling a plugin stops the container but preserves the configuration in the database. The plugin
+can be re-enabled without re-entering config values.
+
+```bash
+# Disable
+curl -X POST http://localhost:8080/api/v1/admin/plugins/idp-keycloak/disable \
+  -H "Authorization: Bearer <admin-token>"
+
+# Enable
+curl -X POST http://localhost:8080/api/v1/admin/plugins/idp-keycloak/enable \
+  -H "Authorization: Bearer <admin-token>"
+```
+
+### What happens on Disable
+
+1. Platform calls `RuntimeAdapter.Stop()` — stops the container (does not remove it)
+2. Closes gRPC connection
+3. Sets `enabled = false` in the `plugins` table
+4. Removes plugin routes from the route table
+5. Plugin no longer called by health loop, middleware, or route interceptor
+
+### What happens on Enable
+
+1. Sets `enabled = true` in the `plugins` table
+2. Calls `RuntimeAdapter.Start()` — starts the existing container
+3. Dials gRPC
+4. Re-discovers capabilities and routes
+5. Adds back to health loop
+
+<Callout type="warning" title="Disabling the active IDP">
+If you disable the active IDP plugin, all users will be unable to log in until another IDP is
+activated or the native IDP is restored. The platform does not automatically fall back.
+</Callout>
+
+## Reconfiguration
+
+Admins can update a plugin's configuration without uninstalling:
+
+```bash
+curl -X PATCH http://localhost:8080/api/v1/admin/plugins/idp-keycloak/config \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "KEYCLOAK_REALM": "production" }'
+```
+
+### What happens on Reconfigure
+
+1. Platform merges new values into the stored config/secrets
+2. Re-encrypts any updated secret fields
+3. Calls `RuntimeAdapter.Redeploy()` — stops the old container, starts a new one with updated
+   env vars
+4. Dials the new gRPC connection
+5. Plugin starts with the new configuration
+
+The plugin does not need to implement anything special for reconfiguration — it always reads config
+from environment variables at startup.
+
+## Removal
+
+```bash
+curl -X DELETE http://localhost:8080/api/v1/admin/plugins/idp-keycloak \
+  -H "Authorization: Bearer <admin-token>"
+```
+
+### What happens on Remove
+
+1. Status set to `removing`
+2. Container stopped and removed
+3. gRPC connection closed
+4. Route table entries removed
+5. Plugin record deleted from `plugins` table
+6. Encrypted secrets deleted
+
+Removal is irreversible. If the plugin was the active IDP, the `active_idp_plugin` setting is
+cleared and the native IDP takes over.
+
+## Container Lifecycle in Detail
+
+### Docker runtime
+
+The platform manages containers on the `kleff` Docker network using the Docker socket at
+`/var/run/docker.sock`.
+
+| Operation | Docker Action |
+|-----------|--------------|
+| Install | `docker pull {image}:{version}` then `docker run` |
+| Enable | `docker start kleff-{id}` |
+| Disable | `docker stop kleff-{id}` |
+| Reconfigure | `docker stop` + `docker rm` + `docker run` (new env) |
+| Remove | `docker stop` + `docker rm` |
+
+### Kubernetes runtime
+
+The platform manages Deployments in the `kleff` namespace using the k8s API.
+
+| Operation | k8s Action |
+|-----------|-----------|
+| Install | Create `Deployment` + `Service` |
+| Enable | Scale Deployment to 1 replica |
+| Disable | Scale Deployment to 0 replicas |
+| Reconfigure | Update Deployment env vars (triggers rolling restart) |
+| Remove | Delete `Deployment` + `Service` |
+
+### Manual runtime
+
+The platform generates configuration snippets instead of managing containers directly. Operators
+copy the generated `docker run` command or k8s manifest and apply it themselves. Health polling
+still works if the container is running at the expected address.
+
+## Viewing Plugin Status
+
+```bash
+# Get live status
+curl http://localhost:8080/api/v1/admin/plugins/idp-keycloak/status \
+  -H "Authorization: Bearer <admin-token>"
+
+# List all plugins with status
+curl http://localhost:8080/api/v1/admin/plugins \
+  -H "Authorization: Bearer <admin-token>"
+```
+
+## Troubleshooting State Issues
+
+### Plugin stuck in INSTALLING
+
+- Docker image is still being pulled (large image on slow connection)
+- Container started but `Health` RPC not responding yet
+- Check container logs: `docker logs kleff-{id}`
+
+### Plugin moves to ERROR immediately
+
+- Container exiting — check for missing required env vars at startup
+- gRPC dial failure — container on wrong network, or `PLUGIN_PORT` mismatch
+- Check `docker logs kleff-{id}` for startup errors
+
+### Plugin keeps restarting (ERROR loop)
+
+The platform attempts 3 restarts before giving up. If the plugin reaches ERROR:
+
+1. Check logs: `docker logs kleff-{id}`
+2. Fix the root cause (misconfigured env var, unreachable dependency, code bug)
+3. Re-enable the plugin via the panel or API
+
+### Plugin healthy but requests fail
+
+- The plugin may be returning errors from its service methods
+- Use `grpcurl` to test RPCs directly (see [Testing](../testing))
+- Check plugin logs for application-level errors

@@ -1,0 +1,322 @@
+export const metadata = {
+  title: "Integration Testing",
+  description: "Test plugins against a local Kleff instance using Docker Compose, write unit tests with bufconn, and set up a CI pipeline.",
+};
+
+# Integration Testing
+
+<Badge variant="stable">Developer Guide</Badge>
+
+This page covers end-to-end testing against a real Kleff instance, unit testing with the `bufconn`
+package, and CI pipeline setup. For quick RPC-level testing with `grpcurl`, see
+[Testing with grpcurl](../testing).
+
+## Testing Against a Local Kleff Instance
+
+### Option 1: Manual Runtime
+
+Set `RUNTIME_PROVIDER=manual` in the platform config — the platform won't manage containers
+automatically, so you start them yourself.
+
+```bash
+# 1. Create the shared network
+docker network create kleff
+
+# 2. Start your plugin on that network
+docker run -d \
+  --name kleff-idp-myprovider \
+  --network kleff \
+  -e PLUGIN_PORT=50051 \
+  -e PLUGIN_ID=idp-myprovider \
+  -e MYPROVIDER_DOMAIN=example.com \
+  -e MYPROVIDER_CLIENT_SECRET=mysecret \
+  ghcr.io/you/idp-myprovider:dev
+
+# 3. Install and activate via the API
+curl -X POST http://localhost:8080/api/v1/admin/plugins \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "idp-myprovider",
+    "version": "dev",
+    "config": {
+      "MYPROVIDER_DOMAIN": "example.com",
+      "MYPROVIDER_CLIENT_SECRET": "mysecret"
+    }
+  }'
+
+curl -X POST http://localhost:8080/api/v1/admin/plugins/idp-myprovider/set-active \
+  -H "Authorization: Bearer <admin-token>"
+```
+
+### Option 2: Docker Compose
+
+The cleanest local development setup:
+
+```yaml
+version: "3.9"
+
+networks:
+  kleff:
+    name: kleff
+
+services:
+  platform:
+    image: ghcr.io/kleffio/platform:latest
+    environment:
+      DATABASE_URL: postgres://kleff:kleff@postgres:5432/kleff
+      SECRET_KEY: dev-secret-key-32-bytes-long!!
+      RUNTIME_PROVIDER: docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    networks:
+      - kleff
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: kleff
+      POSTGRES_PASSWORD: kleff
+      POSTGRES_DB: kleff
+    networks:
+      - kleff
+
+  idp-myprovider:
+    build: .
+    environment:
+      PLUGIN_ID: idp-myprovider
+      PLUGIN_PORT: "50051"
+      MYPROVIDER_DOMAIN: example.com
+      MYPROVIDER_CLIENT_SECRET: mysecret
+    networks:
+      - kleff
+```
+
+```bash
+docker compose up -d
+```
+
+Then install the plugin through the admin panel at `http://localhost:8080`.
+
+## Unit Testing with bufconn
+
+Use `bufconn` to test the gRPC server in-process without opening a real port:
+
+```go
+package grpc_test
+
+import (
+    "context"
+    "net"
+    "testing"
+
+    pluginsv1 "github.com/kleffio/plugin-sdk/v1"
+    grpcadapter "github.com/you/idp-myprovider/internal/adapters/grpc"
+    "github.com/you/idp-myprovider/internal/adapters/myprovider/fake"
+    "github.com/you/idp-myprovider/internal/core/application"
+    "google.golang.org/grpc"
+    "google.golang.org/grpc/test/bufconn"
+)
+
+const bufSize = 1024 * 1024
+
+func newTestServer(t *testing.T) pluginsv1.IdentityPluginClient {
+    t.Helper()
+
+    provider := fake.NewProvider()
+    svc := application.New(provider)
+    srv := grpcadapter.New(svc)
+
+    lis := bufconn.Listen(bufSize)
+    gs := grpc.NewServer()
+    pluginsv1.RegisterIdentityPluginServer(gs, srv)
+    pluginsv1.RegisterPluginHealthServer(gs, srv)
+    go gs.Serve(lis)
+    t.Cleanup(gs.Stop)
+
+    conn, _ := grpc.DialContext(context.Background(), "bufnet",
+        grpc.WithContextDialer(func(_ context.Context, _ string) (net.Conn, error) {
+            return lis.Dial()
+        }),
+        grpc.WithInsecure(),
+    )
+    t.Cleanup(func() { conn.Close() })
+
+    return pluginsv1.NewIdentityPluginClient(conn)
+}
+
+func TestLogin_Success(t *testing.T) {
+    client := newTestServer(t)
+    resp, err := client.Login(context.Background(), &pluginsv1.LoginRequest{
+        Username: "alice@example.com",
+        Password: "correct-password",
+    })
+    if err != nil {
+        t.Fatalf("unexpected RPC error: %v", err)
+    }
+    if resp.Error != nil {
+        t.Fatalf("unexpected plugin error: %v", resp.Error.Message)
+    }
+    if resp.Token == nil || resp.Token.AccessToken == "" {
+        t.Fatal("expected non-empty access token")
+    }
+}
+
+func TestLogin_BadCredentials(t *testing.T) {
+    client := newTestServer(t)
+    resp, err := client.Login(context.Background(), &pluginsv1.LoginRequest{
+        Username: "alice@example.com",
+        Password: "wrong",
+    })
+    if err != nil {
+        t.Fatalf("unexpected RPC error: %v", err)
+    }
+    if resp.Error == nil {
+        t.Fatal("expected plugin error for bad credentials")
+    }
+    if resp.Error.Code != pluginsv1.ErrorCodeUnauthorized {
+        t.Errorf("expected UNAUTHORIZED, got %v", resp.Error.Code)
+    }
+}
+```
+
+### Testing the domain layer
+
+```go
+func TestService_Login_WithFakeProvider(t *testing.T) {
+    provider := &fakeProvider{
+        tokens: map[string]domain.TokenSet{
+            "alice": {AccessToken: "tok-alice", ExpiresIn: 3600},
+        },
+    }
+    svc := application.New(provider)
+
+    tok, err := svc.Login(context.Background(), "alice", "anypassword")
+    if err != nil {
+        t.Fatal(err)
+    }
+    if tok.AccessToken != "tok-alice" {
+        t.Errorf("unexpected token: %s", tok.AccessToken)
+    }
+}
+```
+
+### Verifying capability implementations
+
+```go
+func TestCapabilitiesImplemented(t *testing.T) {
+    // ... set up health + idp + ui clients via bufconn
+
+    resp, err := healthClient.GetCapabilities(ctx, &pluginsv1.GetCapabilitiesRequest{})
+    if err != nil {
+        t.Fatal(err)
+    }
+
+    for _, cap := range resp.Capabilities {
+        switch cap {
+        case pluginsv1.CapabilityIdentityProvider:
+            _, err := idpClient.Login(ctx, &pluginsv1.LoginRequest{Username: "x", Password: "x"})
+            if err != nil {
+                t.Errorf("identity.provider declared but Login RPC failed: %v", err)
+            }
+        case pluginsv1.CapabilityUIManifest:
+            _, err := uiClient.GetUIManifest(ctx, &pluginsv1.GetUIManifestRequest{})
+            if err != nil {
+                t.Errorf("ui.manifest declared but GetUIManifest failed: %v", err)
+            }
+        case pluginsv1.CapabilityAPIRoutes:
+            _, err := httpClient.GetRoutes(ctx, &pluginsv1.GetRoutesRequest{})
+            if err != nil {
+                t.Errorf("api.routes declared but GetRoutes failed: %v", err)
+            }
+        }
+    }
+}
+```
+
+## Integration Tests Against a Real Provider
+
+Run against the actual identity provider in CI using build tags:
+
+```go
+//go:build integration
+
+package integration_test
+
+import (
+    "context"
+    "os"
+    "testing"
+
+    pluginsv1 "github.com/kleffio/plugin-sdk/v1"
+)
+
+func TestLogin_RealProvider(t *testing.T) {
+    addr := os.Getenv("PLUGIN_ADDR")
+    if addr == "" {
+        t.Skip("PLUGIN_ADDR not set — skipping integration test")
+    }
+    // dial addr, run Login, assert token ...
+}
+```
+
+```bash
+PLUGIN_ADDR=localhost:50051 go test -tags integration ./...
+```
+
+## CI Pipeline (GitHub Actions)
+
+```yaml
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Run unit tests
+        run: go test ./...
+
+      - name: Build image
+        run: docker build -t idp-myprovider:ci .
+
+      - name: Start plugin
+        run: |
+          docker run -d --name plugin \
+            -p 50051:50051 \
+            -e PLUGIN_PORT=50051 \
+            -e PLUGIN_ID=idp-myprovider \
+            -e MYPROVIDER_DOMAIN=test.example.com \
+            -e MYPROVIDER_CLIENT_SECRET=ci-secret \
+            idp-myprovider:ci
+
+      - name: Wait for plugin
+        run: |
+          for i in $(seq 1 10); do
+            grpcurl -plaintext localhost:50051 kleff.plugins.v1.PluginHealth/Health && exit 0
+            sleep 2
+          done
+          docker logs plugin && exit 1
+
+      - name: Smoke tests
+        run: |
+          grpcurl -plaintext localhost:50051 kleff.plugins.v1.PluginHealth/GetCapabilities
+          grpcurl -plaintext -d '{}' localhost:50051 kleff.plugins.v1.IdentityPlugin/GetOIDCConfig
+
+      - name: Scan for CVEs
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "idp-myprovider:ci"
+          severity: CRITICAL
+          exit-code: "1"
+```

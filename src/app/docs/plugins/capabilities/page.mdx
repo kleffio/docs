@@ -1,0 +1,103 @@
+export const metadata = {
+  title: "Plugin Capabilities",
+  description: "How Kleff plugin capabilities work — discovery, declaration, and combining multiple capabilities.",
+};
+
+# Plugin Capabilities
+
+<Badge variant="stable">Platform Feature</Badge>
+
+Capabilities are strings returned by the `GetCapabilities` RPC. The platform calls this once when
+it first connects to a plugin to discover which gRPC services the plugin implements. Capabilities
+are a contract — declaring one means the platform will call the corresponding service methods.
+
+## The Four Capabilities
+
+| Capability | gRPC Service | What It Enables | Guide |
+|------------|-------------|-----------------|-------|
+| `identity.provider` | `IdentityPlugin` | Login, token validation, registration, OIDC | [Identity Provider](../identity-provider) |
+| `api.middleware` | `PluginMiddleware` | Called before every authenticated request | [API Middleware](../api-middleware) |
+| `ui.manifest` | `PluginUI` | Nav items and settings pages in the panel | [UI Contributions](../ui-contributions) |
+| `api.routes` | `PluginHTTP` | Owns specific HTTP routes | [HTTP Routes](../http-routes) |
+
+## How Capabilities Are Discovered
+
+1. Platform connects to the plugin's gRPC endpoint
+2. Calls `PluginHealth/GetCapabilities`
+3. Stores the capability list in memory
+4. For `api.routes`: also calls `PluginHTTP/GetRoutes` to register route patterns
+5. Capability list is re-read only on reconnect (after restart or re-enable)
+
+```go
+func (s *Server) GetCapabilities(_ context.Context, _ *pluginsv1.GetCapabilitiesRequest) (*pluginsv1.GetCapabilitiesResponse, error) {
+    return &pluginsv1.GetCapabilitiesResponse{
+        Capabilities: []string{
+            pluginsv1.CapabilityIdentityProvider,
+            pluginsv1.CapabilityUIManifest,
+        },
+    }, nil
+}
+```
+
+<Callout type="warning" title="Capabilities must be stable">
+The capability list must not change across restarts. If you change which capabilities a plugin
+declares, uninstall and reinstall it so the platform re-reads them and updates route and service
+registrations.
+</Callout>
+
+## Declaring Capabilities
+
+Declare only the capabilities you have fully implemented. Declaring without implementing causes
+`NOT_SUPPORTED` errors when the platform calls those methods, which surfaces errors to users.
+
+```json
+{
+  "capabilities": ["identity.provider", "ui.manifest"]
+}
+```
+
+## Combining Capabilities
+
+A single plugin can declare any combination. Embed all five unimplemented base types and override
+only what you implement:
+
+```go
+type Server struct {
+    pluginsv1.UnimplementedPluginHealthServer
+    pluginsv1.UnimplementedIdentityPluginServer
+    pluginsv1.UnimplementedPluginMiddlewareServer
+    pluginsv1.UnimplementedPluginUIServer
+    pluginsv1.UnimplementedPluginHTTPServer
+}
+
+func (s *Server) GetCapabilities(_ context.Context, _ *pluginsv1.GetCapabilitiesRequest) (*pluginsv1.GetCapabilitiesResponse, error) {
+    return &pluginsv1.GetCapabilitiesResponse{
+        Capabilities: []string{
+            pluginsv1.CapabilityIdentityProvider,
+            pluginsv1.CapabilityAPIMiddleware,
+            pluginsv1.CapabilityUIManifest,
+            pluginsv1.CapabilityAPIRoutes,
+        },
+    }, nil
+}
+```
+
+Register all corresponding services in `main.go`:
+
+```go
+gs := grpc.NewServer()
+pluginsv1.RegisterPluginHealthServer(gs, srv)
+pluginsv1.RegisterIdentityPluginServer(gs, srv)
+pluginsv1.RegisterPluginMiddlewareServer(gs, srv)
+pluginsv1.RegisterPluginUIServer(gs, srv)
+pluginsv1.RegisterPluginHTTPServer(gs, srv)
+```
+
+### Common combinations
+
+| Capabilities | Typical Use Case |
+|-------------|-----------------|
+| `identity.provider` + `ui.manifest` | IDP with its own admin UI embedded in settings |
+| `api.routes` + `ui.manifest` | Plugin with a custom REST API and panel pages |
+| `api.middleware` + `identity.provider` | IDP that also enforces per-request RBAC |
+| All four | Full-featured platform extension |

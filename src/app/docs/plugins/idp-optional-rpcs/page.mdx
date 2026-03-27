@@ -1,0 +1,395 @@
+export const metadata = {
+  title: "IDP Optional RPCs",
+  description: "Implement Register, RefreshToken, GetOIDCConfig, and GetUser in an IDP plugin, plus TypeScript and hexagonal architecture examples.",
+};
+
+# IDP Optional RPCs
+
+<Badge variant="stable">Capability: identity.provider</Badge>
+
+These RPCs are optional for IDP plugins. If your provider doesn't support a given operation,
+return `ErrorCodeNotSupported` in the response (with a `nil` Go error). The platform will surface
+a clear error to the panel rather than treating it as a transport failure.
+
+## Register
+
+Called when a user submits the registration form at `POST /api/v1/auth/register`.
+
+```go
+func (s *Server) Register(ctx context.Context, req *pluginsv1.RegisterRequest) (*pluginsv1.RegisterResponse, error) {
+    userID, err := s.provider.Register(ctx,
+        req.Username, req.Email, req.Password,
+        req.FirstName, req.LastName,
+    )
+    if err != nil {
+        if domain.IsConflict(err) {
+            return &pluginsv1.RegisterResponse{
+                Error: &pluginsv1.PluginError{Code: pluginsv1.ErrorCodeConflict, Message: "user already exists"},
+            }, nil
+        }
+        return &pluginsv1.RegisterResponse{
+            Error: &pluginsv1.PluginError{Code: pluginsv1.ErrorCodeInternal, Message: err.Error()},
+        }, nil
+    }
+    return &pluginsv1.RegisterResponse{UserID: userID}, nil
+}
+```
+
+Return `ErrorCodeConflict` when the username **or** email is already taken. Return
+`ErrorCodeNotSupported` if your provider doesn't allow self-registration (e.g., an LDAP directory
+where accounts are provisioned by an administrator).
+
+## RefreshToken
+
+Called when the panel POSTs to `/api/v1/auth/refresh`. Exchange the refresh token for a new
+`TokenSet`.
+
+```go
+func (s *Server) RefreshToken(ctx context.Context, req *pluginsv1.RefreshTokenRequest) (*pluginsv1.RefreshTokenResponse, error) {
+    tok, err := s.provider.RefreshToken(ctx, req.RefreshToken)
+    if err != nil {
+        code := pluginsv1.ErrorCodeInternal
+        if domain.IsUnauthorized(err) {
+            code = pluginsv1.ErrorCodeUnauthorized
+        }
+        return &pluginsv1.RefreshTokenResponse{
+            Error: &pluginsv1.PluginError{Code: code, Message: err.Error()},
+        }, nil
+    }
+    return &pluginsv1.RefreshTokenResponse{
+        Token: &pluginsv1.TokenSet{
+            AccessToken:  tok.AccessToken,
+            RefreshToken: tok.RefreshToken,
+            ExpiresIn:    tok.ExpiresIn,
+            TokenType:    "Bearer",
+        },
+    }, nil
+}
+```
+
+Return `ErrorCodeUnauthorized` when the refresh token has expired or been revoked. The panel will
+redirect the user to the login page.
+
+## GetOIDCConfig
+
+Called when the panel fetches `GET /api/v1/auth/config`. Used exclusively in redirect mode — the
+panel uses this to build the authorization URL and redirect the user to the external IdP.
+
+```go
+func (s *Server) GetOIDCConfig(_ context.Context, _ *pluginsv1.GetOIDCConfigRequest) (*pluginsv1.OIDCConfig, error) {
+    return &pluginsv1.OIDCConfig{
+        Authority: s.config.IssuerURL,
+        ClientID:  s.config.ClientID,
+        JwksURI:   s.config.IssuerURL + "/.well-known/jwks.json",
+        Scopes:    []string{"openid", "profile", "email"},
+        AuthMode:  "redirect",
+    }, nil
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `Authority` | Issuer URL. Panel appends `/.well-known/openid-configuration` to discover endpoints |
+| `ClientID` | OAuth2 client ID registered with the provider for the panel app |
+| `JwksURI` | Public key endpoint for local JWT verification in `ValidateToken` |
+| `Scopes` | OAuth scopes to request. Minimum: `["openid", "profile", "email"]` |
+| `AuthMode` | `"redirect"` for this flow |
+
+Return `ErrorCodeNotSupported` if your plugin is headless-only and doesn't have an OIDC endpoint.
+
+## GetUser
+
+Called when the platform needs to resolve a user ID to a username and email.
+
+```go
+func (s *Server) GetUser(ctx context.Context, req *pluginsv1.GetUserRequest) (*pluginsv1.GetUserResponse, error) {
+    user, err := s.provider.GetUser(ctx, req.UserID)
+    if err != nil {
+        if domain.IsNotFound(err) {
+            return &pluginsv1.GetUserResponse{
+                Error: &pluginsv1.PluginError{Code: pluginsv1.ErrorCodeNotFound, Message: "user not found"},
+            }, nil
+        }
+        return &pluginsv1.GetUserResponse{
+            Error: &pluginsv1.PluginError{Code: pluginsv1.ErrorCodeInternal, Message: err.Error()},
+        }, nil
+    }
+    return &pluginsv1.GetUserResponse{
+        UserID:   user.ID,
+        Username: user.Username,
+        Email:    user.Email,
+    }, nil
+}
+```
+
+Return `ErrorCodeNotSupported` if your plugin doesn't need to implement user lookup.
+
+## TypeScript / Node.js Example
+
+A minimal IDP plugin in Node.js using `@grpc/grpc-js`:
+
+```bash
+npm install @grpc/grpc-js @grpc/proto-loader
+```
+
+```typescript
+import * as grpc from '@grpc/grpc-js';
+import * as protoLoader from '@grpc/proto-loader';
+
+const packageDefinition = protoLoader.loadSync('idp.proto');
+const proto = grpc.loadPackageDefinition(packageDefinition) as any;
+
+const server = new grpc.Server();
+
+server.addService(proto.kleff.plugins.v1.IdentityPlugin.service, {
+  Login: (call: any, callback: any) => {
+    const { Username, Password } = call.request;
+    if (Username === 'admin' && Password === 'secret') {
+      callback(null, {
+        Token: {
+          AccessToken: generateJWT(Username),
+          ExpiresIn: 3600,
+          TokenType: 'Bearer',
+        }
+      });
+    } else {
+      callback(null, {
+        Error: { Code: 2, Message: 'invalid credentials' }
+      });
+    }
+  },
+
+  ValidateToken: (call: any, callback: any) => {
+    const { Token } = call.request;
+    try {
+      const claims = verifyJWT(Token); // use jose or jsonwebtoken
+      callback(null, { Claims: claims });
+    } catch {
+      callback(null, { Error: { Code: 2, Message: 'invalid token' } });
+    }
+  },
+
+  Register: (call: any, callback: any) => {
+    callback(null, { Error: { Code: 6, Message: 'registration not supported' } });
+  },
+
+  GetOIDCConfig: (call: any, callback: any) => {
+    callback(null, {
+      Authority: process.env.OIDC_ISSUER,
+      ClientID:  process.env.OIDC_CLIENT_ID,
+      JwksURI:   process.env.OIDC_ISSUER + '/.well-known/jwks.json',
+      Scopes:    ['openid', 'profile', 'email'],
+      AuthMode:  'redirect',
+    });
+  },
+});
+
+server.addService(proto.kleff.plugins.v1.PluginHealth.service, {
+  Health: (_: any, callback: any) => callback(null, { Status: 1 }),
+  GetCapabilities: (_: any, callback: any) => {
+    callback(null, { Capabilities: ['identity.provider'] });
+  },
+});
+
+server.bindAsync(
+  `0.0.0.0:${process.env.PLUGIN_PORT || 50051}`,
+  grpc.ServerCredentials.createInsecure(),
+  () => { server.start(); console.log('Plugin listening'); }
+);
+```
+
+<Callout type="warning" title="Production token validation in Node.js">
+The `verifyJWT` call above is a placeholder. In production use `jose` or `jsonwebtoken` with
+your provider's public keys. Implement JWKS caching just as you would in Go.
+</Callout>
+
+## Hexagonal Architecture
+
+For production Go plugins, a hexagonal (ports and adapters) architecture keeps domain logic
+independent of both gRPC and the external provider. This simplifies testing and maintenance.
+
+### Directory Structure
+
+```
+my-idp-plugin/
+├── cmd/plugin/main.go           # entry point, wires everything
+├── internal/
+│   ├── domain/
+│   │   ├── types.go             # TokenSet, Claims, errors
+│   │   └── ports.go             # IdentityPort interface
+│   ├── app/
+│   │   └── service.go           # application service
+│   ├── adapters/
+│   │   ├── grpc/server.go       # gRPC adapter (inbound)
+│   │   └── provider/client.go   # provider adapter (outbound)
+│   └── config/config.go         # reads env vars
+├── go.mod
+└── go.sum
+```
+
+### Domain Layer
+
+```go
+// internal/domain/types.go
+package domain
+
+import "errors"
+
+type TokenSet struct {
+    AccessToken  string
+    RefreshToken string
+    IDToken      string
+    ExpiresIn    int64
+    Scope        string
+}
+
+type Claims struct {
+    Subject string
+    Email   string
+    Roles   []string
+}
+
+var ErrUnauthorized = errors.New("unauthorized")
+var ErrConflict     = errors.New("conflict")
+
+func IsUnauthorized(err error) bool { return errors.Is(err, ErrUnauthorized) }
+func IsConflict(err error) bool     { return errors.Is(err, ErrConflict) }
+```
+
+```go
+// internal/domain/ports.go
+package domain
+
+import "context"
+
+type IdentityPort interface {
+    Login(ctx context.Context, username, password string) (*TokenSet, error)
+    ValidateToken(ctx context.Context, token string) (*Claims, error)
+    RefreshToken(ctx context.Context, refreshToken string) (*TokenSet, error)
+    Register(ctx context.Context, username, email, password, firstName, lastName string) (string, error)
+    Ping(ctx context.Context) error
+}
+```
+
+### Application Service
+
+```go
+// internal/app/service.go
+package app
+
+import (
+    "context"
+    "my-plugin/internal/domain"
+)
+
+type Service struct{ provider domain.IdentityPort }
+
+func New(p domain.IdentityPort) *Service { return &Service{provider: p} }
+
+func (s *Service) Login(ctx context.Context, u, p string) (*domain.TokenSet, error) {
+    return s.provider.Login(ctx, u, p)
+}
+func (s *Service) ValidateToken(ctx context.Context, t string) (*domain.Claims, error) {
+    return s.provider.ValidateToken(ctx, t)
+}
+func (s *Service) Ping(ctx context.Context) error { return s.provider.Ping(ctx) }
+```
+
+### gRPC Adapter
+
+```go
+// internal/adapters/grpc/server.go
+package grpcadapter
+
+import (
+    "context"
+    "my-plugin/internal/app"
+    "my-plugin/internal/domain"
+    pluginsv1 "github.com/kleffio/plugin-sdk/v1"
+)
+
+type Server struct {
+    pluginsv1.UnimplementedPluginHealthServer
+    pluginsv1.UnimplementedIdentityPluginServer
+    svc *app.Service
+}
+
+func New(svc *app.Service) *Server { return &Server{svc: svc} }
+
+func (s *Server) Health(_ context.Context, _ *pluginsv1.HealthRequest) (*pluginsv1.HealthResponse, error) {
+    if err := s.svc.Ping(context.Background()); err != nil {
+        return &pluginsv1.HealthResponse{Status: pluginsv1.HealthStatusDegraded, Message: err.Error()}, nil
+    }
+    return &pluginsv1.HealthResponse{Status: pluginsv1.HealthStatusHealthy}, nil
+}
+
+func (s *Server) GetCapabilities(_ context.Context, _ *pluginsv1.GetCapabilitiesRequest) (*pluginsv1.GetCapabilitiesResponse, error) {
+    return &pluginsv1.GetCapabilitiesResponse{
+        Capabilities: []string{pluginsv1.CapabilityIdentityProvider},
+    }, nil
+}
+
+func (s *Server) Login(ctx context.Context, req *pluginsv1.LoginRequest) (*pluginsv1.LoginResponse, error) {
+    tok, err := s.svc.Login(ctx, req.Username, req.Password)
+    if err != nil {
+        code := pluginsv1.ErrorCodeInternal
+        if domain.IsUnauthorized(err) {
+            code = pluginsv1.ErrorCodeUnauthorized
+        }
+        return &pluginsv1.LoginResponse{
+            Error: &pluginsv1.PluginError{Code: code, Message: "invalid credentials"},
+        }, nil
+    }
+    return &pluginsv1.LoginResponse{
+        Token: &pluginsv1.TokenSet{
+            AccessToken:  tok.AccessToken,
+            RefreshToken: tok.RefreshToken,
+            IDToken:      tok.IDToken,
+            ExpiresIn:    tok.ExpiresIn,
+            TokenType:    "Bearer",
+        },
+    }, nil
+}
+```
+
+### main.go
+
+```go
+package main
+
+import (
+    "net"
+    "os"
+
+    pluginsv1 "github.com/kleffio/plugin-sdk/v1"
+    grpcadapter "my-plugin/internal/adapters/grpc"
+    "my-plugin/internal/adapters/provider"
+    "my-plugin/internal/app"
+    "google.golang.org/grpc"
+)
+
+func main() {
+    prov := provider.New(provider.Config{
+        IssuerURL:    mustEnv("PROVIDER_URL"),
+        ClientSecret: mustEnv("CLIENT_SECRET"),
+    })
+    svc := app.New(prov)
+    srv := grpcadapter.New(svc)
+
+    gs := grpc.NewServer()
+    pluginsv1.RegisterPluginHealthServer(gs, srv)
+    pluginsv1.RegisterIdentityPluginServer(gs, srv)
+
+    lis, _ := net.Listen("tcp", ":"+env("PLUGIN_PORT", "50051"))
+    gs.Serve(lis)
+}
+
+func env(k, d string) string {
+    if v := os.Getenv(k); v != "" { return v }
+    return d
+}
+func mustEnv(k string) string {
+    if v := os.Getenv(k); v != "" { return v }
+    panic("required: " + k)
+}
+```

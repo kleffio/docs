@@ -1,0 +1,478 @@
+export const metadata = {
+  title: "Plugin Manifest Reference",
+  description: "Complete reference for every field in kleff-plugin.json — the plugin manifest file.",
+};
+
+# Plugin Manifest Reference
+
+Every Kleff plugin must include a `kleff-plugin.json` file at the root of its repository. This
+manifest is submitted to the plugin registry and is displayed in the marketplace UI. The platform
+reads it during installation to determine configuration fields, capabilities, and metadata.
+
+## Full Example
+
+```json
+{
+  "id": "idp-myprovider",
+  "name": "MyProvider",
+  "type": "idp",
+  "description": "Connect Kleff to MyProvider for single sign-on.",
+  "longDescription": "## Overview\n\nMyProvider is an enterprise identity solution...",
+  "tags": ["sso", "enterprise", "oauth2"],
+  "author": "Your Name or Org",
+  "repo": "https://github.com/you/idp-myprovider",
+  "docs": "https://docs.myprovider.com/kleff",
+  "image": "ghcr.io/you/idp-myprovider",
+  "version": "1.2.0",
+  "minKleffVersion": "0.5.0",
+  "license": "MIT",
+  "verified": false,
+  "logo": "https://cdn.myprovider.com/logo.png",
+  "screenshots": [
+    "https://cdn.myprovider.com/screenshots/login.png",
+    "https://cdn.myprovider.com/screenshots/settings.png"
+  ],
+  "capabilities": ["identity.provider", "ui.manifest"],
+  "config": [
+    {
+      "key": "MYPROVIDER_DOMAIN",
+      "label": "Domain",
+      "description": "Your MyProvider tenant domain (e.g. acme.myprovider.com).",
+      "type": "string",
+      "required": true
+    },
+    {
+      "key": "MYPROVIDER_CLIENT_ID",
+      "label": "Client ID",
+      "description": "OAuth2 client ID from the MyProvider dashboard.",
+      "type": "string",
+      "required": true
+    },
+    {
+      "key": "MYPROVIDER_CLIENT_SECRET",
+      "label": "Client Secret",
+      "description": "OAuth2 client secret. Stored encrypted.",
+      "type": "secret",
+      "required": true
+    },
+    {
+      "key": "AUTH_MODE",
+      "label": "Login Mode",
+      "description": "headless = credentials form; redirect = OIDC redirect flow.",
+      "type": "select",
+      "options": ["headless", "redirect"],
+      "default": "redirect",
+      "required": false
+    },
+    {
+      "key": "SESSION_TIMEOUT",
+      "label": "Session Timeout (seconds)",
+      "type": "number",
+      "default": "3600",
+      "required": false
+    },
+    {
+      "key": "ENABLE_REGISTRATION",
+      "label": "Allow Registration",
+      "type": "boolean",
+      "default": "true",
+      "required": false
+    }
+  ]
+}
+```
+
+## Field Reference
+
+### id
+
+```json
+"id": "idp-myprovider"
+```
+
+**Type:** string — **Required**
+
+The unique plugin identifier. Must be globally unique in the registry. Conventions:
+
+- Lowercase alphanumeric with hyphens only
+- Prefix with the plugin type: `idp-`, `billing-`, `notify-`, etc.
+- Example: `idp-keycloak`, `billing-stripe`, `notify-slack`
+
+The `id` is used as the container name (`kleff-{id}`), the gRPC address, and the primary key in
+the `plugins` database table. It cannot be changed after publication without breaking existing
+installations.
+
+---
+
+### name
+
+```json
+"name": "MyProvider"
+```
+
+**Type:** string — **Required**
+
+Human-readable display name shown in the marketplace UI and admin panel. Title case. Keep it short
+(under 30 characters).
+
+---
+
+### type
+
+```json
+"type": "idp"
+```
+
+**Type:** string — **Required**
+
+The plugin category. Currently defined types:
+
+| Type | Description |
+|------|-------------|
+| `idp` | Identity provider — login, registration, JWT verification |
+| `middleware` | API request interceptor |
+| `extension` | Generic extension (routes, UI) |
+
+Additional types are planned (`billing`, `notifications`, `storage`, `gameruntime`, `audit`). Use
+`extension` for plugins that don't fit an existing category.
+
+---
+
+### description
+
+```json
+"description": "Connect Kleff to MyProvider for single sign-on."
+```
+
+**Type:** string — **Required**
+
+Short one-sentence description shown in marketplace cards and search results. Under 120 characters.
+No markdown.
+
+---
+
+### longDescription
+
+```json
+"longDescription": "## Overview\n\nMyProvider is an enterprise identity solution..."
+```
+
+**Type:** string — **Optional**
+
+Extended description rendered in the plugin detail page. Supports GitHub-flavored Markdown.
+Include setup instructions, prerequisites, and a link to your docs.
+
+---
+
+### tags
+
+```json
+"tags": ["sso", "enterprise", "oauth2"]
+```
+
+**Type:** string[] — **Optional**
+
+Used for marketplace filtering and search. Use lowercase, single-word or hyphenated tags. Common
+tags: `sso`, `enterprise`, `self-hosted`, `cloud`, `oauth2`, `saml`, `ldap`, `billing`,
+`notifications`, `slack`, `stripe`.
+
+---
+
+### author
+
+```json
+"author": "Your Name or Org"
+```
+
+**Type:** string — **Optional**
+
+Name or organization that maintains the plugin. Shown in the marketplace detail view.
+
+---
+
+### repo
+
+```json
+"repo": "https://github.com/you/idp-myprovider"
+```
+
+**Type:** string — **Optional but strongly recommended**
+
+URL to the plugin's source code repository. Required for the `verified` badge — the Kleff team
+audits the source before granting verification.
+
+---
+
+### docs
+
+```json
+"docs": "https://docs.myprovider.com/kleff"
+```
+
+**Type:** string — **Optional**
+
+URL to the plugin's documentation. If omitted, the marketplace links to the `repo` URL.
+
+---
+
+### image
+
+```json
+"image": "ghcr.io/you/idp-myprovider"
+```
+
+**Type:** string — **Required**
+
+Docker image name **without a tag**. The tag is provided separately in `version`. The image must
+be publicly pullable without authentication. The platform pulls
+`{image}:{version}` when installing.
+
+Requirements:
+- Must be publicly accessible (no registry auth)
+- Must expose port `50051` (or respect `PLUGIN_PORT` env var)
+- Must respond to `PluginHealth/Health` RPC within 5 seconds of start
+
+---
+
+### version
+
+```json
+"version": "1.2.0"
+```
+
+**Type:** string — **Required**
+
+Semantic version tag used to pull the Docker image. Must match a published image tag. Use
+[Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
+
+---
+
+### minKleffVersion
+
+```json
+"minKleffVersion": "0.5.0"
+```
+
+**Type:** string — **Optional**
+
+Minimum platform version required to run this plugin. The platform checks this during installation
+and rejects incompatible plugins.
+
+---
+
+### license
+
+```json
+"license": "MIT"
+```
+
+**Type:** string — **Optional**
+
+SPDX license identifier. Common values: `MIT`, `Apache-2.0`, `GPL-3.0`, `Proprietary`.
+
+---
+
+### verified
+
+```json
+"verified": false
+```
+
+**Type:** boolean — **Required**
+
+Always set to `false` in your manifest. The Kleff team sets this to `true` after auditing the
+plugin source code. Verified plugins display a badge in the marketplace and are prioritized in
+search results.
+
+---
+
+### logo
+
+```json
+"logo": "https://cdn.myprovider.com/logo.png"
+```
+
+**Type:** string — **Optional**
+
+URL to a square logo image (minimum 128×128px). Shown in the marketplace card. Must be a stable
+public URL. Recommended format: PNG or SVG with transparent background.
+
+---
+
+### screenshots
+
+```json
+"screenshots": [
+  "https://cdn.myprovider.com/screenshots/login.png"
+]
+```
+
+**Type:** string[] — **Optional**
+
+URLs to screenshot images shown in the plugin detail page. Recommended size: 1280×800px. Show
+the login flow, settings page, and any UI contributions.
+
+---
+
+### capabilities
+
+```json
+"capabilities": ["identity.provider", "ui.manifest"]
+```
+
+**Type:** string[] — **Required**
+
+Declares which gRPC services the plugin implements. The platform uses this list to determine which
+RPCs to call. Valid values:
+
+| Value | gRPC Service | What It Does |
+|-------|-------------|-------------|
+| `identity.provider` | `IdentityPlugin` | Handles login, registration, and token validation |
+| `api.middleware` | `PluginMiddleware` | Intercepts every authenticated request |
+| `ui.manifest` | `PluginUI` | Contributes nav items and settings pages to the panel |
+| `api.routes` | `PluginHTTP` | Owns and handles specific HTTP routes |
+
+The list must be stable across restarts. Changing capabilities requires a plugin reinstall.
+
+---
+
+### config
+
+```json
+"config": [
+  {
+    "key": "KEYCLOAK_URL",
+    "label": "Keycloak URL",
+    "description": "Internal server-to-server URL.",
+    "type": "url",
+    "required": true
+  }
+]
+```
+
+**Type:** ConfigField[] — **Optional**
+
+Defines the configuration fields presented to admins during plugin installation and in the plugin
+settings UI. Each field becomes an environment variable injected into the plugin container at
+deploy time.
+
+## ConfigField Reference
+
+Each object in the `config` array has these fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `key` | string | Yes | Environment variable name (e.g. `KEYCLOAK_URL`) |
+| `label` | string | Yes | Human-readable label shown in the settings form |
+| `description` | string | No | Help text shown below the form field |
+| `type` | string | Yes | Field type (see table below) |
+| `required` | boolean | Yes | Whether the field must be provided at install time |
+| `default` | string | No | Default value pre-filled in the form |
+| `options` | string[] | Conditional | Required when `type` is `"select"` |
+
+### Field Types
+
+| Type | UI Control | Notes |
+|------|------------|-------|
+| `string` | Text input | General text values |
+| `url` | URL input | Validated as a URL (scheme + host required) |
+| `secret` | Password input | Stored AES-256-GCM encrypted; never returned by the API |
+| `number` | Number input | Integer or float; stored as a string env var |
+| `boolean` | Toggle switch | Values: `"true"` or `"false"` |
+| `select` | Dropdown | Requires an `options` array |
+
+### Field Type Examples
+
+```json
+[
+  {
+    "key": "SERVER_URL",
+    "label": "Server URL",
+    "type": "url",
+    "required": true
+  },
+  {
+    "key": "API_KEY",
+    "label": "API Key",
+    "type": "secret",
+    "required": true
+  },
+  {
+    "key": "MAX_CONNECTIONS",
+    "label": "Max Connections",
+    "type": "number",
+    "default": "10",
+    "required": false
+  },
+  {
+    "key": "ENABLE_FEATURE",
+    "label": "Enable Feature",
+    "type": "boolean",
+    "default": "false",
+    "required": false
+  },
+  {
+    "key": "LOG_LEVEL",
+    "label": "Log Level",
+    "type": "select",
+    "options": ["debug", "info", "warn", "error"],
+    "default": "info",
+    "required": false
+  }
+]
+```
+
+## Platform-Injected Variables
+
+Two variables are always injected by the platform regardless of what is declared in `config`:
+
+| Variable | Value | Description |
+|----------|-------|-------------|
+| `PLUGIN_ID` | e.g. `idp-keycloak` | Plugin `id` from the manifest |
+| `PLUGIN_PORT` | e.g. `50051` | gRPC port the plugin must listen on |
+
+Your plugin should always read `PLUGIN_PORT` from the environment rather than hardcoding `50051`:
+
+```go
+port := os.Getenv("PLUGIN_PORT")
+if port == "" {
+    port = "50051"
+}
+lis, _ := net.Listen("tcp", ":"+port)
+```
+
+## Secrets
+
+Config fields with `"type": "secret"` are handled specially:
+
+1. Admin enters the secret value in the settings form (rendered as a password input)
+2. Platform separates secrets from plain config before persisting
+3. Secret values are encrypted with AES-256-GCM before storage
+4. On deployment, secrets are decrypted and injected as environment variables
+5. Secrets are **never** returned in any API response — the settings form shows a masked placeholder
+
+This means your plugin reads secrets exactly like any other env var:
+
+```go
+clientSecret := os.Getenv("MYPROVIDER_CLIENT_SECRET")
+```
+
+## Validation Rules
+
+The platform enforces these rules at install time:
+
+| Rule | Detail |
+|------|--------|
+| `id` is unique | No two installed plugins can share an `id` |
+| `image` is pullable | The platform must be able to pull `{image}:{version}` |
+| Required fields present | All `required: true` config fields must be provided |
+| `type` is recognized | Unknown types are rejected |
+| `minKleffVersion` satisfied | Platform version must meet or exceed this |
+
+## Registry Submission
+
+The `kleff-plugin.json` at your repo root is also the record submitted to the plugin registry
+(`github.com/kleffio/plugin-registry`). The registry's `plugins.json` is a catalog of manifests
+from all published plugins.
+
+See [Publishing a Plugin](../publishing) for the submission process.

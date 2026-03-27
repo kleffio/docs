@@ -1,0 +1,226 @@
+export const metadata = {
+  title: "Keycloak Plugin",
+  description: "Reference for the idp-keycloak plugin — configuration, auth modes, and internals.",
+};
+
+# Keycloak Plugin
+
+<Badge variant="stable">Official · Verified</Badge>
+
+The `idp-keycloak` plugin connects Kleff to a [Keycloak](https://www.keycloak.org/)
+realm for enterprise-grade identity management. It supports headless login via
+Direct Access Grants, user registration via the Admin REST API, RS256 JWT
+verification via the JWKS endpoint, and OIDC redirect login.
+
+- **Image:** `ghcr.io/kleffio/idp-keycloak`
+- **Repo:** `github.com/kleffio/plugins/idp-keycloak`
+- **License:** MIT
+- **Min Kleff version:** 0.5.0
+
+## Quick Start
+
+```bash
+# 1. Create the shared Docker network
+docker network create kleff
+
+# 2. Start Keycloak
+docker run -d \
+  --name keycloak \
+  --network kleff \
+  -e KEYCLOAK_ADMIN=admin \
+  -e KEYCLOAK_ADMIN_PASSWORD=admin \
+  -p 8080:8080 \
+  quay.io/keycloak/keycloak:25.0 start-dev
+
+# 3. Install the plugin via the Kleff admin API
+curl -X POST http://localhost:8080/api/v1/admin/plugins \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "idp-keycloak",
+    "version": "1.0.0",
+    "config": {
+      "KEYCLOAK_URL": "http://keycloak:8080",
+      "KEYCLOAK_REALM": "master",
+      "KEYCLOAK_CLIENT_ID": "admin-cli",
+      "KEYCLOAK_ADMIN_USER": "admin",
+      "KEYCLOAK_ADMIN_PASSWORD": "admin"
+    }
+  }'
+
+# 4. Set as the active IDP
+curl -X POST http://localhost:8080/api/v1/admin/plugins/idp-keycloak/set-active \
+  -H "Authorization: Bearer <admin-token>"
+```
+
+## Configuration
+
+| Key                       | Label           | Type     | Required | Default       | Description                                                        |
+|---------------------------|-----------------|----------|----------|---------------|--------------------------------------------------------------------|
+| `KEYCLOAK_URL`            | Keycloak URL    | `url`    | Yes      | —             | Internal (server-to-server) Keycloak root URL                      |
+| `KEYCLOAK_PUBLIC_URL`     | Public URL      | `url`    | No       | `KEYCLOAK_URL`| Browser-reachable URL used in OIDC config. Set when internal and public URLs differ. |
+| `KEYCLOAK_REALM`          | Realm           | `string` | No       | `master`      | Keycloak realm name                                                |
+| `KEYCLOAK_CLIENT_ID`      | Client ID       | `string` | No       | `kleff-panel` | Client with Direct Access Grants enabled                           |
+| `KEYCLOAK_CLIENT_SECRET`  | Client Secret   | `secret` | No       | —             | Required for confidential clients                                  |
+| `KEYCLOAK_ADMIN_USER`     | Admin Username  | `string` | No       | `admin`       | Admin credentials for user registration                            |
+| `KEYCLOAK_ADMIN_PASSWORD` | Admin Password  | `secret` | No       | —             | Admin password                                                     |
+| `AUTH_MODE`               | Login Mode      | `select` | No       | `headless`    | `headless` or `redirect` (see below)                               |
+| `PLUGIN_PORT`             | —               | —        | No       | `50051`       | gRPC listen port (set by the platform)                             |
+
+## Authentication Modes
+
+### `headless` (default)
+
+Users enter their credentials in the Kleff panel login form. The plugin
+authenticates them via Keycloak's **Direct Access Grant** (Resource Owner
+Password Credentials flow):
+
+```
+User → Kleff panel form → Platform API → gRPC Login() → Keycloak token endpoint
+```
+
+**Keycloak requirement:** The client must have **Direct Access Grants** enabled.
+
+### `redirect`
+
+Users are redirected to the Keycloak login page via **OIDC Authorization Code**
+flow. The panel retrieves OIDC discovery parameters from the plugin via the
+`GetOIDCConfig` RPC and builds the redirect URL.
+
+```
+User → Kleff panel → redirect to Keycloak → callback → Platform validates ID token
+```
+
+Use `redirect` mode when you want users to use Keycloak's full login page,
+including MFA prompts, social login, and password reset links.
+
+<Callout type="info" title="KEYCLOAK_PUBLIC_URL in redirect mode">
+In redirect mode, the `authority` returned by `GetOIDCConfig` must be a URL
+reachable by the user's browser. Set `KEYCLOAK_PUBLIC_URL` if your Keycloak
+instance is on an internal network — the plugin uses `KEYCLOAK_URL` for
+server-to-server calls and `KEYCLOAK_PUBLIC_URL` for browser-facing URLs.
+</Callout>
+
+## Keycloak Setup
+
+### Minimum configuration
+
+1. Create a realm (e.g. `kleff`) or use `master` for testing.
+2. Create a client:
+   - **Client ID:** `kleff-panel`
+   - **Client authentication:** On (confidential)
+   - **Authentication flows → Direct access grants:** On (for `headless` mode)
+3. Copy the **client secret** into `KEYCLOAK_CLIENT_SECRET`.
+4. For user registration, provide admin credentials in
+   `KEYCLOAK_ADMIN_USER` / `KEYCLOAK_ADMIN_PASSWORD`.
+
+### Recommended realm settings
+
+- Enable **email as username** if users log in with their email address.
+- Configure SMTP in **Realm Settings → Email** for password reset emails.
+- Set token lifetimes under **Realm Settings → Tokens**:
+  - Access token: 5–15 minutes
+  - Refresh token: 24–168 hours
+
+## gRPC API
+
+The plugin implements the following RPCs from `platform/api/plugins/v1/`:
+
+| Service          | RPC               | Description                                              |
+|------------------|-------------------|----------------------------------------------------------|
+| `PluginHealth`   | `Health`          | Returns `HEALTHY`. Polled by the platform every 30s.    |
+| `PluginHealth`   | `GetCapabilities` | Returns `identity.provider` and `ui.manifest`.          |
+| `IdentityPlugin` | `Login`           | Direct Access Grant against the Keycloak token endpoint. |
+| `IdentityPlugin` | `Register`        | Creates a user via Keycloak Admin REST API.              |
+| `IdentityPlugin` | `GetUser`         | Not supported — returns `NOT_SUPPORTED`.                 |
+| `IdentityPlugin` | `ValidateToken`   | Verifies RS256 JWT against the Keycloak JWKS endpoint.  |
+| `IdentityPlugin` | `GetOIDCConfig`   | Returns OIDC discovery parameters for the panel.         |
+| `IdentityPlugin` | `RefreshToken`    | Exchanges a refresh token for a new token set.           |
+| `PluginUI`       | `GetUIManifest`   | Adds a settings page linking to the Keycloak admin UI.  |
+
+## Token Validation
+
+The plugin validates JWTs locally — no round-trip to Keycloak per request:
+
+1. Parse the JWT header to extract `kid` and verify `alg == RS256`.
+2. Look up the RSA public key by `kid` in the in-process cache.
+3. If the cache is empty or older than 5 minutes, fetch
+   `GET /realms/{realm}/protocol/openid-connect/certs` and refresh.
+4. Verify the PKCS1v15 signature against `SHA-256(header.payload)`.
+5. Decode claims — check `sub` is present and `exp` has not passed.
+6. Return `{subject, email, roles}` (merged from `roles` and `realm_access.roles`).
+
+## Internal Architecture
+
+The plugin follows hexagonal architecture:
+
+```
+cmd/plugin/main.go          Wires all layers, starts gRPC server
+│
+├── adapters/grpc/server.go     Inbound: translates gRPC ↔ domain types
+│
+├── core/application/service.go  Use-case layer; delegates to IDPProvider port
+│
+├── core/ports/provider.go       IDPProvider interface (the boundary)
+│
+├── core/domain/types.go         TokenSet, TokenClaims, OIDCConfig, RegisterRequest
+├── core/domain/errors.go        ErrUnauthorized, ErrConflict
+│
+└── adapters/keycloak/
+      client.go                  Login, Register, RefreshToken, OIDCConfig via HTTP
+      jwks.go                    ValidateToken with 5-min cached JWKS
+```
+
+**Dependency direction:**
+
+```
+grpc/server → application/service → ports/IDPProvider ← keycloak/Client
+```
+
+No Keycloak-specific logic leaks into the gRPC adapter or application layer.
+
+## Building the Image
+
+The Dockerfile is built from the repo root (it needs both `plugin-sdk/` and
+`plugins/idp-keycloak/` in the build context):
+
+```bash
+docker build \
+  -f plugins/idp-keycloak/Dockerfile \
+  -t ghcr.io/kleffio/idp-keycloak:1.0.0 \
+  .
+```
+
+The final image is Alpine-based with only the statically linked binary and CA
+certificates (~15–20 MB).
+
+## Troubleshooting
+
+### Plugin stuck in ERROR state
+
+```bash
+# Check gRPC health directly
+grpcurl -plaintext <plugin-host>:50051 kleff.plugins.v1.PluginHealth/Health
+```
+
+If the health check fails, check that the container is running and that
+`KEYCLOAK_URL` is reachable from inside the plugin container.
+
+### Login returns UNAUTHORIZED
+
+- Verify **Direct Access Grants** is enabled on the Keycloak client.
+- Confirm `KEYCLOAK_REALM` and `KEYCLOAK_CLIENT_ID` match your Keycloak config.
+- For confidential clients, ensure `KEYCLOAK_CLIENT_SECRET` is set correctly.
+
+### Registration fails
+
+- Verify `KEYCLOAK_ADMIN_USER` and `KEYCLOAK_ADMIN_PASSWORD` are correct.
+- The admin account must have permission to create users in the target realm.
+- If the realm is not `master`, confirm the admin credentials have cross-realm
+  admin access (or use a realm-specific admin).
+
+### Token validation fails with "unknown key id"
+
+The JWKS cache may contain stale keys after a Keycloak key rotation. The cache
+expires automatically after 5 minutes. If you rotate keys frequently, restart
+the plugin container to force an immediate refresh.

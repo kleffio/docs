@@ -1,0 +1,140 @@
+export const metadata = {
+  title: "Plugin System Overview",
+  description: "How Kleff's plugin system works — architecture, lifecycle, and plugin types.",
+};
+
+# Plugin System Overview
+
+<Badge variant="stable">Platform Feature</Badge>
+
+Kleff's plugin system lets the platform be extended without modifying core code.
+Plugins are standalone processes that communicate with the platform over gRPC.
+The platform ships a built-in **native** plugin for zero-dependency deployments;
+everything else is opt-in and managed through the marketplace UI.
+
+## How It Works
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  Panel (Next.js)                                                 │
+│  /admin/plugins — Browse · Install · Configure · Enable · Remove │
+└────────────────────────┬─────────────────────────────────────────┘
+                         │ HTTP / JSON
+┌────────────────────────▼─────────────────────────────────────────┐
+│  Platform API (Go)                                               │
+│                                                                  │
+│  Plugin Registry    Plugin Manager       Plugin Store            │
+│  (fetches catalog)  (lifecycle owner)    (Postgres)              │
+│                           │                                      │
+│                     RuntimeAdapter                               │
+│                     (Docker / k8s)                               │
+│                           │                                      │
+│        gRPC connections to running plugin containers             │
+└───────────────────┬──────────────────────────────────────────────┘
+                    │ Docker API / k8s API
+┌───────────────────▼──────────────────────────────────────────────┐
+│  Container Runtime                                               │
+│  Docker: kleff-idp-keycloak    k8s: Deployment/kleff-idp-keycloak│
+└──────────────────────────────────────────────────────────────────┘
+```
+
+1. The **Plugin Registry** fetches the plugin catalog from GitHub.
+2. An admin installs a plugin from the marketplace UI.
+3. The **Plugin Manager** pulls the Docker image via the **RuntimeAdapter** and
+   starts the container on the `kleff` network (or as a k8s Deployment).
+4. The platform dials the plugin's gRPC endpoint (port `50051` by default).
+5. The platform polls the `Health` RPC every 30 seconds. If the plugin becomes
+   unreachable it is moved to `ERROR` state and an alert is shown in the panel.
+
+## Plugin Types
+
+Currently defined:
+
+| Type  | gRPC Service     | Description                                         |
+|-------|------------------|-----------------------------------------------------|
+| `idp` | `IdentityPlugin` | Identity provider — login, registration, JWT verify |
+
+Planned types:
+
+| Type            | Description                                          |
+|-----------------|------------------------------------------------------|
+| `billing`       | Billing provider (Stripe, Paddle, custom)            |
+| `notifications` | Alert/notification sinks (email, Slack, PagerDuty)  |
+| `storage`       | Game server file storage backends (S3, B2, NFS)      |
+| `gameruntime`   | Custom game server runtimes beyond Docker/k8s        |
+| `audit`         | External audit log sinks (Splunk, Datadog, etc.)     |
+
+A single plugin binary may implement multiple types (e.g., a Supabase plugin
+could implement both `idp` and `storage`).
+
+## Plugin Lifecycle
+
+```
+AVAILABLE  → (Install) → INSTALLING → (Ready) → RUNNING
+                                                    │ Disable
+                                                 DISABLED
+                                                    │ Enable ↑
+                                                    │ Remove
+                                                 REMOVING → (Done)
+RUNNING / DISABLED → ERROR  (container crashed or gRPC unreachable)
+```
+
+The platform attempts automatic restart up to 3 times before leaving a plugin
+in `ERROR` state.
+
+## Plugin Store (Postgres)
+
+All installed plugin state is persisted in Postgres:
+
+```sql
+CREATE TABLE plugins (
+    id           TEXT PRIMARY KEY,        -- "idp-keycloak"
+    type         TEXT NOT NULL,           -- "idp"
+    display_name TEXT NOT NULL,
+    image        TEXT NOT NULL,           -- "ghcr.io/kleffio/idp-keycloak:1.0.0"
+    grpc_addr    TEXT NOT NULL,           -- "kleff-idp-keycloak:50051"
+    config       JSONB NOT NULL DEFAULT '{}',
+    secrets      JSONB NOT NULL DEFAULT '{}',  -- AES-256-GCM encrypted
+    enabled      BOOLEAN NOT NULL DEFAULT true,
+    installed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+Config fields marked `"type": "secret"` in the manifest are stored in the
+`secrets` column, encrypted at rest with AES-256-GCM, and injected as
+environment variables into the container at deploy time. They are never returned
+in API responses.
+
+## Security Model
+
+- Only admins can install, configure, or remove plugins.
+- gRPC communication runs on a private Docker network or k8s cluster network —
+  not exposed to the public internet.
+- The Docker runtime requires access to `/var/run/docker.sock`. Operators
+  uncomfortable with this can use the Kubernetes runtime (scoped RBAC) or the
+  manual runtime (generates config snippets without automation).
+
+## Native Plugin (Built-In)
+
+The native plugin is compiled directly into the platform binary and runs
+in-process. It is the default IDP for new installations and requires no
+external services.
+
+**Capabilities:** username/password auth (bcrypt, Postgres), platform-signed JWTs
+(RS256), JWKS endpoint at `/.well-known/jwks.json`, password reset via SMTP,
+and email verification.
+
+When another IDP plugin is installed and set as active, the native plugin is
+bypassed for login/register but remains available as a fallback.
+
+## Configuration
+
+| Env Var               | Default    | Description                                     |
+|-----------------------|------------|-------------------------------------------------|
+| `RUNTIME_PROVIDER`    | `docker`   | `docker`, `kubernetes`, or `manual`             |
+| `PLUGIN_REGISTRY_URL` | (GitHub)   | Override the plugin catalog URL                 |
+| `PLUGIN_NETWORK`      | `kleff`    | Docker network plugins are attached to          |
+| `PLUGIN_GRPC_PORT`    | `50051`    | Port plugins listen on inside their container   |
+| `SECRET_KEY`          | (required) | AES-256 key for encrypting plugin secrets       |
+| `PLUGIN_NAMESPACE`    | `kleff`    | k8s namespace for plugin Deployments            |

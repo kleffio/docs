@@ -101,4 +101,49 @@ export const navigation: NavSection[] = [
       { label: "Errors", slug: "errors" },
     ],
   },
+  {
+    title: "Plugins",
+    prefix: "plugins",
+    items: [
+      { label: "Overview", slug: "overview" },
+      { label: "Authoring a Plugin", slug: "authoring" },
+      {
+        label: "SDK & Reference",
+        items: [
+          { label: "SDK Reference", slug: "sdk-reference" },
+          { label: "Common Types", slug: "sdk-common-types" },
+          { label: "IDP Types", slug: "sdk-idp-types" },
+          { label: "Capabilities", slug: "capabilities" },
+          { label: "Manifest Reference", slug: "manifest-reference" },
+          { label: "Plugin Lifecycle", slug: "lifecycle" },
+          { label: "Security", slug: "security" },
+        ],
+      },
+      {
+        label: "Capability Guides",
+        items: [
+          { label: "Identity Provider", slug: "identity-provider" },
+          { label: "Token Validation", slug: "idp-token-validation" },
+          { label: "Optional RPCs", slug: "idp-optional-rpcs" },
+          { label: "API Middleware", slug: "api-middleware" },
+          { label: "UI Contributions", slug: "ui-contributions" },
+          { label: "HTTP Routes", slug: "http-routes" },
+        ],
+      },
+      {
+        label: "Publishing",
+        items: [
+          { label: "Testing with grpcurl", slug: "testing" },
+          { label: "Integration Testing", slug: "testing-integration" },
+          { label: "Publishing", slug: "publishing" },
+        ],
+      },
+      {
+        label: "Official Plugins",
+        items: [
+          { label: "Keycloak (idp-keycloak)", slug: "idp-keycloak" },
+        ],
+      },
+    ],
+  },
 ];

@@ -1,0 +1,208 @@
+export const metadata = {
+  title: "Testing Plugins with grpcurl",
+  description: "Call every plugin gRPC method directly with grpcurl — the fastest feedback loop for plugin development.",
+};
+
+# Testing Plugins with grpcurl
+
+<Badge variant="stable">Developer Guide</Badge>
+
+The fastest way to test a plugin is calling gRPC methods directly on the running container, without
+going through the platform at all. This page covers every RPC call you'll need.
+
+For end-to-end testing against a real Kleff instance, CI setup, and unit testing, see
+[Integration Testing](../testing-integration).
+
+## Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) — build and run the plugin container
+- [`grpcurl`](https://github.com/fullstorydev/grpcurl) — command-line gRPC client
+
+## Start the Plugin
+
+```bash
+docker build -t ghcr.io/you/idp-myprovider:dev .
+
+docker run --rm -p 50051:50051 \
+  -e PLUGIN_PORT=50051 \
+  -e PLUGIN_ID=idp-myprovider \
+  -e MYPROVIDER_DOMAIN=example.com \
+  -e MYPROVIDER_CLIENT_SECRET=mysecret \
+  --name kleff-idp-myprovider \
+  ghcr.io/you/idp-myprovider:dev
+```
+
+## PluginHealth
+
+### Health
+
+```bash
+grpcurl -plaintext localhost:50051 kleff.plugins.v1.PluginHealth/Health
+```
+
+Expected:
+
+```json
+{ "Status": 1, "Message": "" }
+```
+
+`Status 1` = `HEALTHY`. `2` = `DEGRADED`. `3` = `UNHEALTHY`.
+
+### GetCapabilities
+
+```bash
+grpcurl -plaintext localhost:50051 kleff.plugins.v1.PluginHealth/GetCapabilities
+```
+
+Expected:
+
+```json
+{ "Capabilities": ["identity.provider", "ui.manifest"] }
+```
+
+## IdentityPlugin
+
+### Login
+
+```bash
+grpcurl -plaintext \
+  -d '{"Username": "alice@example.com", "Password": "hunter2"}' \
+  localhost:50051 kleff.plugins.v1.IdentityPlugin/Login
+```
+
+Success:
+
+```json
+{
+  "Token": {
+    "AccessToken": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "RefreshToken": "...",
+    "ExpiresIn": 3600,
+    "TokenType": "Bearer"
+  }
+}
+```
+
+Failure (bad credentials):
+
+```json
+{ "Error": { "Code": 2, "Message": "invalid credentials" } }
+```
+
+### ValidateToken
+
+```bash
+grpcurl -plaintext \
+  -d '{"Token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."}' \
+  localhost:50051 kleff.plugins.v1.IdentityPlugin/ValidateToken
+```
+
+Success:
+
+```json
+{
+  "Claims": {
+    "Subject": "user-123",
+    "Email": "alice@example.com",
+    "Roles": ["admin", "viewer"]
+  }
+}
+```
+
+### Register
+
+```bash
+grpcurl -plaintext \
+  -d '{
+    "Username": "bob",
+    "Email": "bob@example.com",
+    "Password": "s3cure!",
+    "FirstName": "Bob",
+    "LastName": "Smith"
+  }' \
+  localhost:50051 kleff.plugins.v1.IdentityPlugin/Register
+```
+
+### GetOIDCConfig
+
+```bash
+grpcurl -plaintext -d '{}' \
+  localhost:50051 kleff.plugins.v1.IdentityPlugin/GetOIDCConfig
+```
+
+### RefreshToken
+
+```bash
+grpcurl -plaintext \
+  -d '{"RefreshToken": "..."}' \
+  localhost:50051 kleff.plugins.v1.IdentityPlugin/RefreshToken
+```
+
+## PluginMiddleware
+
+### OnRequest
+
+```bash
+grpcurl -plaintext \
+  -d '{
+    "UserID": "user-123",
+    "Roles": ["admin"],
+    "Method": "GET",
+    "Path": "/api/v1/servers",
+    "Headers": {}
+  }' \
+  localhost:50051 kleff.plugins.v1.PluginMiddleware/OnRequest
+```
+
+Expected:
+
+```json
+{ "Allow": true }
+```
+
+## PluginUI
+
+### GetUIManifest
+
+```bash
+grpcurl -plaintext -d '{}' \
+  localhost:50051 kleff.plugins.v1.PluginUI/GetUIManifest
+```
+
+## PluginHTTP
+
+### GetRoutes
+
+```bash
+grpcurl -plaintext -d '{}' \
+  localhost:50051 kleff.plugins.v1.PluginHTTP/GetRoutes
+```
+
+### Handle
+
+```bash
+grpcurl -plaintext \
+  -d '{
+    "Request": {
+      "Method": "GET",
+      "Path": "/api/v1/my-plugin/status",
+      "RawQuery": "",
+      "Headers": {},
+      "UserID": "user-123",
+      "Roles": ["admin"]
+    }
+  }' \
+  localhost:50051 kleff.plugins.v1.PluginHTTP/Handle
+```
+
+## Error Code Quick Reference
+
+| Code | Value | Meaning |
+|------|-------|---------|
+| `UNKNOWN` | 0 | Default (avoid) |
+| `INVALID_ARGUMENT` | 1 | Bad request data |
+| `UNAUTHORIZED` | 2 | Bad credentials / expired token |
+| `CONFLICT` | 3 | Resource already exists |
+| `NOT_FOUND` | 4 | Resource doesn't exist |
+| `INTERNAL` | 5 | Unexpected error |
+| `NOT_SUPPORTED` | 6 | RPC not implemented |

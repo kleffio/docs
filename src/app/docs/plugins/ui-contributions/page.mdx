@@ -1,0 +1,302 @@
+export const metadata = {
+  title: "UI Contributions",
+  description: "Add navigation items and settings pages to the Kleff panel using the ui.manifest capability.",
+};
+
+# UI Contributions
+
+<Badge variant="stable">Capability: ui.manifest</Badge>
+
+The `ui.manifest` capability lets a plugin inject UI into the Kleff management panel — sidebar
+navigation items and settings/admin pages. The platform aggregates manifests from all installed
+plugins at login time and merges them into the panel.
+
+## How It Works
+
+1. User logs in to the panel
+2. Panel calls `GET /api/v1/plugins/ui-manifests`
+3. Platform calls `PluginUI/GetUIManifest` on every plugin that declared `ui.manifest`
+4. All manifests are aggregated into a single response
+5. Panel renders plugin nav items under a **Plugins** section in the sidebar
+6. Plugin settings pages become accessible under `/settings/`
+
+<Callout type="info" title="Manifests are fetched once at login">
+UI manifests are loaded when the user authenticates and cached for the session. If a plugin changes
+its manifest, users need to log out and back in to see the update.
+</Callout>
+
+## UIManifest Type
+
+```go
+type UIManifest struct {
+    PluginID      string
+    NavItems      []*NavItem
+    SettingsPages []*SettingsPage
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `PluginID` | `string` | Must match the plugin's manifest `id`. Used to associate UI items with the plugin |
+| `NavItems` | `[]*NavItem` | Sidebar navigation items contributed by this plugin |
+| `SettingsPages` | `[]*SettingsPage` | Admin settings pages shown under Settings |
+
+Always set `PluginID` to `os.Getenv("PLUGIN_ID")` — the platform injects the correct value at runtime.
+
+## NavItem Type
+
+```go
+type NavItem struct {
+    Label      string
+    Icon       string
+    Path       string
+    Permission string
+    Children   []*NavItem
+}
+```
+
+### Label
+
+Display text shown in the sidebar. Keep it concise (under 20 characters). Also used as a tooltip
+when the sidebar is collapsed.
+
+### Icon
+
+A [Lucide React](https://lucide.dev) icon name. The panel imports the icon component by this name
+at runtime. If the name is invalid, the panel falls back to a generic icon.
+
+Common icon names:
+
+| Name | Typical Use |
+|------|-------------|
+| `Shield` | Authentication, security |
+| `Users` | User management |
+| `Settings` | Configuration |
+| `Settings2` | Advanced settings |
+| `Key` | API keys, credentials |
+| `Lock` | Access control, permissions |
+| `Globe` | DNS, external services |
+| `Database` | Storage, persistence |
+| `BarChart2` | Analytics, metrics |
+| `Bell` | Notifications, alerts |
+| `Zap` | Automation, webhooks |
+| `Server` | Infrastructure, nodes |
+| `Monitor` | Monitoring, dashboards |
+| `Layers` | Groups, multi-tenant |
+| `FileText` | Logs, audit trail |
+| `Activity` | Health, live status |
+| `Puzzle` | Generic plugin |
+| `GitBranch` | Deployments, releases |
+
+### Path
+
+The full panel route the item links to. Must start with `/`. Plugin routes are typically under
+`/admin/plugins/{plugin-id}/`. The platform does not validate that the path resolves — ensure it
+corresponds to a settings page or a route served via `api.routes`.
+
+### Permission
+
+The role a user must have to see this item. Compared case-insensitively against
+`TokenClaims.Roles`. Empty string means visible to all authenticated users.
+
+| Value | Who Sees the Item |
+|-------|-------------------|
+| `""` | All logged-in users |
+| `"admin"` | Users with the `admin` role |
+| `"operator"` | Users with the `operator` role |
+| `"viewer"` | Users with the `viewer` role |
+
+### Children
+
+Nested nav items rendered as an expandable sub-menu. The panel supports up to two levels of
+nesting. Child items follow the same `NavItem` structure but typically don't declare their own
+`Children`.
+
+## SettingsPage Type
+
+```go
+type SettingsPage struct {
+    Label     string
+    Path      string
+    IframeURL string
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Label` | `string` | Name shown in the settings navigation |
+| `Path` | `string` | Route segment under `/settings/`. `"identity"` → `/settings/identity` |
+| `IframeURL` | `string` | If set, the panel embeds this URL in an `<iframe>` |
+
+### IframeURL examples
+
+| URL | Embeds |
+|-----|--------|
+| `http://keycloak:8080/admin` | Keycloak admin console |
+| `http://grafana:3000/d/abc123` | Grafana dashboard |
+| `/api/v1/my-plugin/ui` | Custom SPA served via plugin HTTP routes |
+
+<Callout type="warning" title="IframeURL must be browser-reachable">
+`IframeURL` is loaded by the user's browser, not by the platform backend. If your admin UI is on
+an internal network, expose it through a plugin `api.routes` endpoint or a reverse proxy.
+</Callout>
+
+## Implementing GetUIManifest
+
+### Minimal example
+
+```go
+func (s *Server) GetUIManifest(_ context.Context, _ *pluginsv1.GetUIManifestRequest) (*pluginsv1.UIManifest, error) {
+    return &pluginsv1.UIManifest{
+        PluginID: os.Getenv("PLUGIN_ID"),
+        NavItems: []*pluginsv1.NavItem{
+            {
+                Label:      "Identity",
+                Icon:       "Shield",
+                Path:       "/admin/plugins/myidp",
+                Permission: "admin",
+            },
+        },
+        SettingsPages: []*pluginsv1.SettingsPage{
+            {
+                Label:     "Identity Provider",
+                Path:      "identity-provider",
+                IframeURL: "http://myidp-admin:8080",
+            },
+        },
+    }, nil
+}
+```
+
+### With nested navigation
+
+```go
+func (s *Server) GetUIManifest(_ context.Context, _ *pluginsv1.GetUIManifestRequest) (*pluginsv1.UIManifest, error) {
+    pluginID := os.Getenv("PLUGIN_ID")
+    base := "/admin/plugins/" + pluginID
+
+    return &pluginsv1.UIManifest{
+        PluginID: pluginID,
+        NavItems: []*pluginsv1.NavItem{
+            {
+                Label:      "Auth",
+                Icon:       "Shield",
+                Path:       base,
+                Permission: "admin",
+                Children: []*pluginsv1.NavItem{
+                    {Label: "Users",   Icon: "Users",    Path: base + "/users"},
+                    {Label: "Groups",  Icon: "Layers",   Path: base + "/groups"},
+                    {Label: "Clients", Icon: "Key",      Path: base + "/clients"},
+                    {Label: "Logs",    Icon: "FileText",  Path: base + "/logs"},
+                },
+            },
+        },
+        SettingsPages: []*pluginsv1.SettingsPage{
+            {Label: "General",  Path: pluginID + "-general"},
+            {Label: "Security", Path: pluginID + "-security"},
+            {Label: "Admin UI", Path: pluginID + "-admin", IframeURL: "http://myidp:8080/admin"},
+        },
+    }, nil
+}
+```
+
+### Dynamic manifest based on config
+
+```go
+func (s *Server) GetUIManifest(_ context.Context, _ *pluginsv1.GetUIManifestRequest) (*pluginsv1.UIManifest, error) {
+    pluginID := os.Getenv("PLUGIN_ID")
+
+    manifest := &pluginsv1.UIManifest{
+        PluginID: pluginID,
+        NavItems: []*pluginsv1.NavItem{
+            {
+                Label:      "Dashboard",
+                Icon:       "Monitor",
+                Path:       "/admin/plugins/" + pluginID,
+                Permission: "admin",
+            },
+        },
+    }
+
+    // Only expose the iframe page if the admin URL is configured
+    if adminURL := os.Getenv("ADMIN_UI_URL"); adminURL != "" {
+        manifest.SettingsPages = append(manifest.SettingsPages, &pluginsv1.SettingsPage{
+            Label:     "Admin Console",
+            Path:      pluginID + "-console",
+            IframeURL: adminURL,
+        })
+    }
+
+    return manifest, nil
+}
+```
+
+## Combining ui.manifest with api.routes
+
+The most integrated pattern is declaring both capabilities: your plugin serves its own admin SPA
+via `api.routes` **and** registers nav items pointing to those routes. No external admin service
+required.
+
+```go
+// GetRoutes: claim the UI paths
+func (s *Server) GetRoutes(_ context.Context, _ *pluginsv1.GetRoutesRequest) (*pluginsv1.GetRoutesResponse, error) {
+    return &pluginsv1.GetRoutesResponse{
+        Routes: []*pluginsv1.Route{
+            {Method: "GET", Path: "/api/v1/my-plugin/items",  Public: false},
+            {Method: "POST", Path: "/api/v1/my-plugin/items", Public: false},
+            // Serve the SPA assets
+            {Method: "GET", Path: "/api/v1/my-plugin/ui/*",   Public: false},
+        },
+    }, nil
+}
+
+// GetUIManifest: link to the SPA
+func (s *Server) GetUIManifest(_ context.Context, _ *pluginsv1.GetUIManifestRequest) (*pluginsv1.UIManifest, error) {
+    return &pluginsv1.UIManifest{
+        PluginID: os.Getenv("PLUGIN_ID"),
+        NavItems: []*pluginsv1.NavItem{
+            {
+                Label:      "My Plugin",
+                Icon:       "Puzzle",
+                Path:       "/api/v1/my-plugin/ui/",
+                Permission: "admin",
+            },
+        },
+    }, nil
+}
+```
+
+## Registering the gRPC Server
+
+```go
+gs := grpc.NewServer()
+pluginsv1.RegisterPluginHealthServer(gs, srv)
+pluginsv1.RegisterPluginUIServer(gs, srv)
+```
+
+## Manifest Declaration
+
+```json
+{
+  "capabilities": ["ui.manifest"],
+  "config": [
+    {
+      "key": "ADMIN_UI_URL",
+      "label": "Admin UI URL",
+      "description": "External admin console to embed in settings (optional).",
+      "type": "url",
+      "required": false
+    }
+  ]
+}
+```
+
+## Troubleshooting
+
+| Problem | Likely Cause | Fix |
+|---------|-------------|-----|
+| Nav item not appearing | `Permission` doesn't match user's roles | Check `TokenClaims.Roles` for the logged-in user |
+| Icon not rendering | Invalid Lucide icon name | Verify the name exists at [lucide.dev](https://lucide.dev) |
+| Settings page shows blank iframe | `IframeURL` not browser-reachable | Use a public URL or expose via `api.routes` |
+| Nav items gone after plugin restart | Manifest re-fetch failed | Check plugin health and gRPC connectivity |
+| Settings route returns 404 | No page registered for the path | Pair with `api.routes` to serve the page |
