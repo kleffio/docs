@@ -15,6 +15,7 @@ const withMDX = createMDX({
 });
 
 const nextConfig: NextConfig = {
+  transpilePackages: ["@kleffio/ui"],
   pageExtensions: ["ts", "tsx", "mdx"],
 };
 

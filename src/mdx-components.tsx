@@ -2,7 +2,7 @@ import type { MDXComponents } from "mdx/types";
 import { Callout } from "@/components/ui/callout";
 import { CodeGroup, CodeBlock } from "@/components/ui/code-group";
 import { Tabs, Tab } from "@/components/ui/tabs";
-import { Badge } from "@/components/ui/badge";
+import { Badge } from "@kleffio/ui";
 import { Pre } from "@/components/ui/pre";
 import { PageHeader } from "@/components/layout/PageHeader";
 
