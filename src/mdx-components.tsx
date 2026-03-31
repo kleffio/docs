@@ -1,9 +1,9 @@
 import type { MDXComponents } from "mdx/types";
-import { Callout } from "@/components/ui/callout";
-import { CodeGroup, CodeBlock } from "@/components/ui/code-group";
-import { Tabs, Tab } from "@/components/ui/tabs";
-import { Badge } from "@kleffio/ui";
-import { Pre } from "@/components/ui/pre";
+import { Callout } from "@kleffio/ui/callout";
+import { CodeGroup, CodeBlock } from "@kleffio/ui/code-group";
+import { Tabs, Tab } from "@kleffio/ui/mdx-tabs";
+import { Badge } from "@kleffio/ui/badge";
+import { Pre } from "@kleffio/ui/pre";
 import { PageHeader } from "@/components/layout/PageHeader";
 
 (Tabs as any).Tab = Tab;

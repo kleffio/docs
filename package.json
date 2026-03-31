@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.8",
-    "@kleffio/ui": "git+https://github.com/kleffio/ui.git#main",
+    "@kleffio/ui": "github:kleffio/ui#v0.1.0",
     "@mdx-js/loader": "^3.1.1",
     "@mdx-js/react": "^3.1.0",
     "@next/mdx": "^15.2.0",
