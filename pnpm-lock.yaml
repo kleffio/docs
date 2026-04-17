@@ -12,8 +12,8 @@ importers:
         specifier: ^5.2.8
         version: 5.2.8
       '@kleffio/ui':
-        specifier: github:kleffio/ui#v0.1.2
-        version: https://codeload.github.com/kleffio/ui/tar.gz/43590e0e08ca0fd9f1d15c0497d9b6e5ed2ab82b(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+        specifier: github:kleffio/ui#v0.1.3
+        version: https://codeload.github.com/kleffio/ui/tar.gz/7db03ef6a9cc91e40377b18449ff2816fcecf261(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@mdx-js/loader':
         specifier: ^3.1.1
         version: 3.1.1
@@ -375,8 +375,8 @@ packages:
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
 
-  '@kleffio/ui@https://codeload.github.com/kleffio/ui/tar.gz/43590e0e08ca0fd9f1d15c0497d9b6e5ed2ab82b':
-    resolution: {tarball: https://codeload.github.com/kleffio/ui/tar.gz/43590e0e08ca0fd9f1d15c0497d9b6e5ed2ab82b}
+  '@kleffio/ui@https://codeload.github.com/kleffio/ui/tar.gz/7db03ef6a9cc91e40377b18449ff2816fcecf261':
+    resolution: {tarball: https://codeload.github.com/kleffio/ui/tar.gz/7db03ef6a9cc91e40377b18449ff2816fcecf261}
     version: 0.1.0
     peerDependencies:
       react: ^19.0.0
@@ -3622,7 +3622,7 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  '@kleffio/ui@https://codeload.github.com/kleffio/ui/tar.gz/43590e0e08ca0fd9f1d15c0497d9b6e5ed2ab82b(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)':
+  '@kleffio/ui@https://codeload.github.com/kleffio/ui/tar.gz/7db03ef6a9cc91e40377b18449ff2816fcecf261(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)':
     dependencies:
       '@base-ui/react': 1.3.0(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       class-variance-authority: 0.7.1
