@@ -1,4 +1,7 @@
 ---
+enhancement:
+  - head-branch: ["^enhancement/", "^enh/"]
+
 docs:
   - changed-files:
       - any-glob-to-any-file: "src/**/*.mdx"
